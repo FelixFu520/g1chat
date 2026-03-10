@@ -10,7 +10,6 @@ from g1chat.audio.audio_device import AudioDevice
 
 def record_and_playback(
     duration: float = 5.0,
-    sample_rate: Optional[int] = None,
     enable_aec: bool = False,
     monitor: bool = True,
 ) -> None:
@@ -18,7 +17,7 @@ def record_and_playback(
     1. 实时从扬声器监听
     2. 同时把录音内容保存为 WAV 文件
     """
-    device = AudioDevice(sample_rate=sample_rate, enable_aec=enable_aec)
+    device = AudioDevice(enable_aec=enable_aec)
 
     try:
         device.start_streams()
