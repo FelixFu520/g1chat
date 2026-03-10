@@ -437,6 +437,12 @@ async def receive_message(websocket: websockets.WebSocketClientProtocol) -> Mess
             return msg
         else:
             raise ValueError(f"Unexpected message type: {type(data)}")
+    except (websockets.exceptions.ConnectionClosed,
+            websockets.exceptions.ConnectionClosedOK,
+            websockets.exceptions.ConnectionClosedError) as e:
+        # 连接关闭属于正常现象（如服务端未发送关闭帧），用 debug 级别记录
+        logger.debug(f"Failed to receive message: {e}")
+        raise
     except Exception as e:
         logger.error(f"Failed to receive message: {e}")
         raise

@@ -445,12 +445,12 @@ class ASRTTS:
         try:
             # ========== 清理资源：结束连接 ==========
             await finish_connection(websocket)
-            try:
-                msg = await wait_for_event(
-                    websocket, MsgType.FullServerResponse, EventType.ConnectionFinished
-                )
-            except Exception as e:
-                logger.warning(f"等待连接结束事件失败: {e}")
+            # try:
+            #     msg = await wait_for_event(
+            #         websocket, MsgType.FullServerResponse, EventType.ConnectionFinished
+            #     )
+            # except Exception as e:
+            #     logger.warning(f"等待连接结束事件失败: {e}")
             await websocket.close()
             logger.info("TTS: 连接已关闭")
         except Exception as e:
