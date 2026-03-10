@@ -1,3 +1,4 @@
+import os
 import pyaudio
 import numpy as np
 import queue
@@ -5,6 +6,9 @@ import asyncio
 from collections import deque
 
 from g1chat.utils.logging import default_logger
+
+G1CHAT_AUDIO_DEVICE_SPEAKER_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") else "USB"
+G1CHAT_AUDIO_DEVICE_MIC_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") else "USB"
 
 
 class AudioEchoCancellation:
@@ -417,32 +421,44 @@ class AudioEchoCancellation:
 class AudioDevice:
     """音频设备管理类"""
     
-    def __init__(self, input_device_index=None, output_device_index=None, sample_rate=16000, channels=1, chunk_size=1024, enable_aec=True):
+    def __init__(self, input_device_index=None, output_device_index=None, channels=1, chunk_size=1024, enable_aec=True):
         """
         初始化音频设备
         
         Args:
             input_device_index: 输入设备索引,None表示使用默认输入设备
             output_device_index: 输出设备索引,None表示使用默认输出设备
-            sample_rate: 采样率
-            channels: 声道数
-            chunk_size: 音频块大小
+            channels: 声道数,None表示使用输入设备的最大输入通道数
+            chunk_size: 音频块大小,None表示使用输入设备的默认采样率
             enable_aec: 是否启用回声消除
         """
         self.p = pyaudio.PyAudio()
         
-        # 分别获取输入和输出设备
-        self.input_device_index = input_device_index if input_device_index is not None else self._get_default_input_device()
-        self.output_device_index = output_device_index if output_device_index is not None else self._get_default_output_device()
-        
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.chunk_size = chunk_size
-        self.format = pyaudio.paInt16
+        # 分别获取输入和输出设备（优先按环境变量中的设备名模糊匹配）
+        if input_device_index is None:
+            input_device_index = self._find_device_index_by_name(
+                G1CHAT_AUDIO_DEVICE_MIC_NAME,
+                is_input=True,
+            )
+            if input_device_index is None:
+                input_device_index = self._get_default_input_device()
+        self.input_device_index = input_device_index
+        if output_device_index is None:
+            output_device_index = self._find_device_index_by_name(
+                G1CHAT_AUDIO_DEVICE_SPEAKER_NAME,
+                is_input=False,
+            )
+            if output_device_index is None:
+                output_device_index = self._get_default_output_device()
+        self.output_device_index = output_device_index
         
         # 获取设备信息
         self.input_device_info = self.p.get_device_info_by_index(self.input_device_index)
         self.output_device_info = self.p.get_device_info_by_index(self.output_device_index)
+        self.sample_rate = int(self.input_device_info.get("defaultSampleRate", 16000))
+        self.channels = channels if channels else self.input_device_info.get("maxInputChannels", 1)
+        self.chunk_size = chunk_size if chunk_size else self.input_device_info.get("defaultSampleRate", 1024)
+        self.format = pyaudio.paInt16
         self._print_device_info()
         
         # 回声消除器(使用优化的参数 - 平衡回声消除和语音保留)
@@ -469,7 +485,27 @@ class AudioDevice:
         
         # 控制标志
         self.is_running = False
-        
+    
+    def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
+        """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）"""
+        try:
+            count = self.p.get_device_count()
+            for i in range(count):
+                info = self.p.get_device_info_by_index(i)
+                # 只在对应方向上有效的设备里查
+                if is_input and info.get("maxInputChannels", 0) <= 0:
+                    continue
+                if (not is_input) and info.get("maxOutputChannels", 0) <= 0:
+                    continue
+                if name_keyword.lower() in str(info.get("name", "")).lower():
+                    default_logger.info(
+                        f"根据关键字 '{name_keyword}' 匹配到 {'输入' if is_input else '输出'} 设备: {info['name']} (index={i})"
+                    )
+                    return i
+        except Exception as e:
+            default_logger.warning(f"根据关键字查找音频设备失败: {e}")
+        return None
+
     def _get_default_input_device(self):
         """获取系统默认输入设备"""
         try:
@@ -493,22 +529,21 @@ class AudioDevice:
         default_logger.info("="*60)
         default_logger.info("音频设备信息:")
         default_logger.info(f"输入设备: {self.input_device_info['name']}")
-        default_logger.info(f"设备索引: {self.input_device_index}")
-        default_logger.info(f"最大输入通道: {self.input_device_info['maxInputChannels']}")
-        default_logger.info(f"默认采样率: {self.input_device_info['defaultSampleRate']}")
+        default_logger.info(f"  设备索引: {self.input_device_index}")
+        default_logger.info(f"  最大输入通道: {self.input_device_info['maxInputChannels']}")
+        default_logger.info(f"  默认采样率: {self.input_device_info['defaultSampleRate']}")
+        default_logger.info(f"  声道数: {self.channels}")
+        default_logger.info(f"  设定的Chunk大小: {self.chunk_size}")
         default_logger.info(f"输出设备: {self.output_device_info['name']}")
-        default_logger.info(f"设备索引: {self.output_device_index}")
-        default_logger.info(f"最大输出通道: {self.output_device_info['maxOutputChannels']}")
-        default_logger.info(f"默认采样率: {self.output_device_info['defaultSampleRate']}")
-        default_logger.info(f"音频配置: {self.sample_rate}")
-        default_logger.info(f"声道数: {self.channels}")
-        default_logger.info(f"块大小: {self.chunk_size}")
+        default_logger.info(f"  设备索引: {self.output_device_index}")
+        default_logger.info(f"  最大输出通道: {self.output_device_info['maxOutputChannels']}")
+        default_logger.info(f"  默认采样率: {self.output_device_info['defaultSampleRate']}")
         default_logger.info("="*60)
     
     def _input_callback(self, in_data, frame_count, time_info, status):
         """录音回调函数"""
-        if status:
-            default_logger.info(f"输入状态: {status}")
+        # if status:
+            # default_logger.info(f"输入状态: {status}")
         
         # 应用回声消除(如果启用)
         if self.aec is not None:
@@ -523,8 +558,8 @@ class AudioDevice:
     
     def _output_callback(self, in_data, frame_count, time_info, status):
         """播放回调函数 - 优化版本,避免队列重建"""
-        if status:
-            default_logger.info(f"输出状态: {status}")
+        # if status:
+            # default_logger.info(f"输出状态: {status}")
         
         required_bytes = frame_count * self.channels * 2  # 2 bytes per sample (int16)
         
