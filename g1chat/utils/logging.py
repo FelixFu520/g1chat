@@ -17,7 +17,7 @@ class Logger:
     
     def __init__(
         self,
-        log_dir: str = os.path.join(G1_CHAT_DIR, "logs"),
+        log_dir: str = os.path.join(G1CHAT_WORK_DIR, "logs"),
         log_file: str = "g1chat.log",
         rotation: str = "10 MB",
         retention: str = "7 days",
