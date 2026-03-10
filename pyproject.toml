@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=70.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "g1chat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "aiohttp>=3.10.11",
+    "loguru>=0.7.3",
+    "numpy>=1.24.4",
+    "pyaudio>=0.2.14",
+    "websockets>=13.1",
+]
+
+[project.scripts]
+g1chat-audio-device-list = "g1chat.tools.audio_device_list:main"
+
+
+[tool.setuptools]
+packages = { find = { where = ["."], include = ["g1chat", "g1chat.*"] } }
+
+[tool.setuptools.package-data]
+g1chat = ["../assets/**/*"]
+
