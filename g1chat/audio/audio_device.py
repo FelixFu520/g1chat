@@ -1,3 +1,4 @@
+import os
 import pyaudio
 import numpy as np
 import queue
@@ -6,6 +7,8 @@ from collections import deque
 
 from g1chat.utils.logging import default_logger
 
+G1CHAT_AUDIO_DEVICE_SPEAKER_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") else "USB"
+G1CHAT_AUDIO_DEVICE_MIC_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") else "USB"
 
 class AudioEchoCancellation:
     """改进的回声消除实现 - 基于双讲检测的NLMS + 多重抑制"""
@@ -431,9 +434,24 @@ class AudioDevice:
         """
         self.p = pyaudio.PyAudio()
         
-        # 分别获取输入和输出设备
-        self.input_device_index = input_device_index if input_device_index is not None else self._get_default_input_device()
-        self.output_device_index = output_device_index if output_device_index is not None else self._get_default_output_device()
+        # 分别获取输入和输出设备（优先按环境变量中的设备名模糊匹配）
+        if input_device_index is None:
+            input_device_index = self._find_device_index_by_name(
+                G1CHAT_AUDIO_DEVICE_MIC_NAME,
+                is_input=True,
+            )
+            if input_device_index is None:
+                input_device_index = self._get_default_input_device()
+        if output_device_index is None:
+            output_device_index = self._find_device_index_by_name(
+                G1CHAT_AUDIO_DEVICE_SPEAKER_NAME,
+                is_input=False,
+            )
+            if output_device_index is None:
+                output_device_index = self._get_default_output_device()
+
+        self.input_device_index = input_device_index
+        self.output_device_index = output_device_index
         
         self.sample_rate = sample_rate
         self.channels = channels
@@ -470,6 +488,26 @@ class AudioDevice:
         # 控制标志
         self.is_running = False
         
+    def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
+        """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）"""
+        try:
+            count = self.p.get_device_count()
+            for i in range(count):
+                info = self.p.get_device_info_by_index(i)
+                # 只在对应方向上有效的设备里查
+                if is_input and info.get("maxInputChannels", 0) <= 0:
+                    continue
+                if (not is_input) and info.get("maxOutputChannels", 0) <= 0:
+                    continue
+                if name_keyword.lower() in str(info.get("name", "")).lower():
+                    default_logger.info(
+                        f"根据关键字 '{name_keyword}' 匹配到 {'输入' if is_input else '输出'} 设备: {info['name']} (index={i})"
+                    )
+                    return i
+        except Exception as e:
+            default_logger.warning(f"根据关键字查找音频设备失败: {e}")
+        return None
+
     def _get_default_input_device(self):
         """获取系统默认输入设备"""
         try:
