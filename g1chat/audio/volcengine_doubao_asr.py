@@ -206,7 +206,7 @@ class RequestBuilder:
                 "enable_ddc": True,
                 "show_utterances": True,
                 "enable_nonstream": True,
-                "end_window_size": 800, # 检测到400ms静音后触发断句
+                "end_window_size": 400, # 检测到400ms静音后触发断句
                 "force_to_speech_time": 1,
                 "result_type": "single"
 
