@@ -19,6 +19,7 @@ sudo apt-get install portaudio19-dev
 python -m g1chat.tools.audio_device_list --device USB
 python -m g1chat.tools.convert_mp3_wav assets/check_speaker.mp3 assets/check_speaker.wav
 python -m g1chat.tools.wav_info assets/check_speaker.wav
+python -m g1chat.tools.check_audio_device
 ```
 ### python 启动
 

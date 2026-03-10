@@ -103,3 +103,5 @@ def record_and_playback(
 
     finally:
         device.cleanup()
+
+
