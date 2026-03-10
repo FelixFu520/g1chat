@@ -508,6 +508,9 @@ class AudioDevice:
 
         # 控制标志
         self.is_running = False
+
+        # 打印设备信息
+        self._print_device_info()
         
     def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
         """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）"""
