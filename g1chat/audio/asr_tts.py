@@ -20,10 +20,10 @@ import copy
 from queue import Queue
 from pydub import AudioSegment
 import websockets
-from robota.utils.logging import default_logger as logger
-from robota.audio.audio_device import AudioDevice
-from robota.audio.volcengine_doubao_asr import AsrWsClient
-from robota.audio.volcengine_doubao_tts import (
+from g1chat.utils.logging import default_logger as logger
+from g1chat.audio.audio_device import AudioDevice
+from g1chat.audio.volcengine_doubao_asr import AsrWsClient
+from g1chat.audio.volcengine_doubao_tts import (
     EventType,
     MsgType,
     finish_connection,
