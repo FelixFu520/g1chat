@@ -1,6 +1,6 @@
 import argparse
 from typing import Optional
-from g1chat.utils.audio_utils import record_and_playback
+from g1chat.audio.misc import record_and_playback
 
 
 def main() -> None:
