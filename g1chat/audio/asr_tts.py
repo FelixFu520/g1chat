@@ -56,9 +56,6 @@ class ASRTTS:
         # ========== 音频设备配置 ==========
         # 初始化音频设备，用于录音和播放
         self.audio_device = AudioDevice(
-            sample_rate=16000,  # 采样率16kHz，符合ASR服务要求
-            channels=1,         # 单声道
-            chunk_size=1024,    # 每次读取1024个样本
             enable_aec=True     # 启用回声消除（实时ASR测试时可以关闭）
         )
         # 启动音频设备的录音和播放流
@@ -81,8 +78,9 @@ class ASRTTS:
         self.tts_voice_type = "zh_male_m191_uranus_bigtts"  # TTS语音类型（中文男声）
         self.tts_encoding = "mp3"  # TTS音频编码格式（mp3或pcm）
         self.tts_endpoint = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"  # TTS WebSocket服务地址
-        self.tts_sample_rate = 16000  # TTS播放采样率（Hz）
+        self.tts_sample_rate = self.audio_device.sample_rate  # TTS播放采样率（Hz）
         self.tts_running = False  # TTS处理器运行状态标志
+        self.tts_processing = False  # 是否正在处理某条文本（已出队但尚未播放完）
 
     async def _realtime_audio_generator(self, audio_device: AudioDevice, duration_seconds: int = None, chunk_duration_ms: int = 200):
         """
@@ -404,18 +402,27 @@ class ASRTTS:
         }
 
         # ========== 连接到 WebSocket 服务器 ==========
-        # 使用更宽松的 ping 配置，避免长时间运行后超时
+        # 参考 g1chat.tools.doubao_tts 中的实现，使用 websockets 10+ 的 extra_headers 参数
         websocket = await websockets.connect(
-            self.tts_endpoint, 
-            additional_headers=headers, 
+            self.tts_endpoint,
+            extra_headers=headers,  # websockets 10+ 使用 extra_headers 传递请求头
             max_size=10 * 1024 * 1024,  # 最大消息大小10MB（用于接收音频数据）
-            ping_interval=30,  # 每30秒发送一次ping保持连接活跃（从20秒增加到30秒）
-            ping_timeout=20,   # ping超时时间20秒（从10秒增加到20秒，更宽松）
-            close_timeout=10  # 关闭连接超时时间10秒
+            ping_interval=30,  # 每30秒发送一次ping保持连接活跃
+            ping_timeout=20,   # ping超时时间20秒
+            close_timeout=10,  # 关闭连接超时时间10秒
         )
-        # logger.info(
-        #     f"TTS: 已连接到服务器, Logid: {websocket.response.headers.get('x-tt-logid', 'N/A')}",
-        # )
+        # 部分 websockets 版本不暴露 response 属性，这里做兼容处理
+        try:
+            response = getattr(websocket, "response", None)
+            if response is not None:
+                resp_headers = getattr(response, "headers", None)
+                if resp_headers is not None:
+                    logid = resp_headers.get("x-tt-logid") or resp_headers.get("X-Tt-Logid")
+                    if logid:
+                        logger.info(f"TTS: 已连接到服务器, Logid: {logid}")
+        except Exception:
+            # 兼容老版本或不同实现，不强依赖 response
+            pass
         
         # ========== 启动连接 ==========
         await start_connection(websocket)
@@ -509,7 +516,9 @@ class ASRTTS:
                                     if text:
                                         current_text_data = text_data  # 保存当前文本数据，用于重连时重新放入队列
                                         # logger.info(f"TTS: 处理文本: {text}")
+                                        self.tts_processing = True
                                         await self._process_tts_text(websocket, text)
+                                        self.tts_processing = False
                                         processed_any = True
                                         current_text_data = None  # 处理成功后清除
                             
@@ -595,6 +604,7 @@ class ASRTTS:
             # ========== 清理资源 ==========
             await self._close_websocket_connection(websocket)
             self.tts_running = False  # 重置运行标志
+            self.tts_processing = False  # 重置处理标志
 
     async def _process_tts_text(self, websocket, text: str):
         """

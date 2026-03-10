@@ -32,6 +32,12 @@ python -m g1chat.tools.check_audio_device
 python -m g1chat.tools.doubao_asr --mode file --file assets/check_speaker.wav
 python -m g1chat.tools.doubao_asr --mode realtime
 
+# 测试豆包TTS
+python -m g1chat.tools.doubao_tts
+
+# 测试集合豆包ASR—TTS的类
+python -m g1chat.tools.doubao_asrtts_asr
+ python -m g1chat.tools.doubao_asrtts_tts --count 10
 ```
 ### python 启动
 
