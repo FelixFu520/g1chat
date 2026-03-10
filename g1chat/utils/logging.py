@@ -9,7 +9,7 @@ __all__ = [
     'default_logger',
 ]
 
-G1_CHAT_DIR = os.getenv("G1_CHAT_DIR") if os.getenv("G1_CHAT_DIR") else os.path.expanduser('~/.g1chat')
+G1CHAT_WORK_DIR = os.getenv("G1CHAT_WORK_DIR") if os.getenv("G1CHAT_WORK_DIR") else os.path.expanduser('~/.g1chat')
 
 
 class Logger:
