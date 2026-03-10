@@ -1,4 +1,3 @@
-import os
 import pyaudio
 import numpy as np
 import queue
@@ -7,8 +6,6 @@ from collections import deque
 
 from g1chat.utils.logging import default_logger
 
-G1CHAT_AUDIO_DEVICE_SPEAKER_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") else "USB"
-G1CHAT_AUDIO_DEVICE_MIC_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") else "USB"
 
 class AudioEchoCancellation:
     """改进的回声消除实现 - 基于双讲检测的NLMS + 多重抑制"""
@@ -420,72 +417,34 @@ class AudioEchoCancellation:
 class AudioDevice:
     """音频设备管理类"""
     
-    def __init__(self, 
-        input_device_index=None, 
-        output_device_index=None, 
-        sample_rate=None, 
-        channels=1, 
-        chunk_size=1024, 
-        enable_aec=True,
-        enable_resample=True
-    ):
+    def __init__(self, input_device_index=None, output_device_index=None, sample_rate=16000, channels=1, chunk_size=1024, enable_aec=True):
         """
         初始化音频设备
         
         Args:
-            input_device_index: 输入设备索引,None表示先使用环境变量中指定的设备名模糊匹配输入设备,如果匹配不到则使用默认输入设备
-            output_device_index: 输出设备索引,None表示先使用环境变量中指定的设备名模糊匹配输出设备,如果匹配不到则使用默认输出设备
-            sample_rate: **逻辑采样率**(用于播放/保存音频的数据采样率)。None 表示使用设备默认采样率;
-                         当该值与真实设备采样率不一致时,会在 `AudioDevice` 内部对输入/输出做重采样。
-            channels: 声道数(逻辑声道数)
-            chunk_size: 音频块大小(以逻辑采样率为基准的帧数)
+            input_device_index: 输入设备索引,None表示使用默认输入设备
+            output_device_index: 输出设备索引,None表示使用默认输出设备
+            sample_rate: 采样率
+            channels: 声道数
+            chunk_size: 音频块大小
             enable_aec: 是否启用回声消除
-            enable_resample: 是否启用与设备采样率之间的自动重采样
         """
         self.p = pyaudio.PyAudio()
-        self.enable_resample = enable_resample
-
-        # 分别获取输入和输出设备（优先按环境变量中的设备名模糊匹配）
-        if input_device_index is None:
-            input_device_index = self._find_device_index_by_name(
-                G1CHAT_AUDIO_DEVICE_MIC_NAME,
-                is_input=True,
-            )
-            if input_device_index is None:
-                input_device_index = self._get_default_input_device()
-        self.input_device_index = input_device_index
-        if output_device_index is None:
-            output_device_index = self._find_device_index_by_name(
-                G1CHAT_AUDIO_DEVICE_SPEAKER_NAME,
-                is_input=False,
-            )
-            if output_device_index is None:
-                output_device_index = self._get_default_output_device()
-        self.output_device_index = output_device_index
         
-
+        # 分别获取输入和输出设备
+        self.input_device_index = input_device_index if input_device_index is not None else self._get_default_input_device()
+        self.output_device_index = output_device_index if output_device_index is not None else self._get_default_output_device()
+        
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.chunk_size = chunk_size
+        self.format = pyaudio.paInt16
+        
         # 获取设备信息
         self.input_device_info = self.p.get_device_info_by_index(self.input_device_index)
         self.output_device_info = self.p.get_device_info_by_index(self.output_device_index)
+        self._print_device_info()
         
-        # 真实设备采样率(硬件)
-        self.input_device_rate = int(self.input_device_info.get("defaultSampleRate", 16000))
-        self.output_device_rate = int(self.output_device_info.get("defaultSampleRate", 16000))
-        
-        # 逻辑采样率(对外暴露的播放/保存采样率)
-        if sample_rate is None:
-            # 默认情况下,逻辑采样率与输入设备保持一致
-            self.sample_rate = int(self.input_device_rate)
-        else:
-            self.sample_rate = int(sample_rate)
-        # 声道数
-        self.channels = channels
-        # 音频块大小
-        self.chunk_size = chunk_size
-        # 音频格式
-        self.format = pyaudio.paInt16
-
-
         # 回声消除器(使用优化的参数 - 平衡回声消除和语音保留)
         if enable_aec:
             self.aec = AudioEchoCancellation(
@@ -497,47 +456,20 @@ class AudioDevice:
         else:
             self.aec = None
         
-
         # 音频流
         self.input_stream = None
         self.output_stream = None
         
-
         # 播放队列和录音队列
         self.playback_queue = queue.Queue()
         self.recording_queue = queue.Queue()
         
-
         # 播放缓冲区 - 用于处理不完整的chunk
         self.playback_buffer = bytearray()
         
-
         # 控制标志
         self.is_running = False
-
-        # 打印设备信息
-        self._print_device_info()
         
-    def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
-        """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）"""
-        try:
-            count = self.p.get_device_count()
-            for i in range(count):
-                info = self.p.get_device_info_by_index(i)
-                # 只在对应方向上有效的设备里查
-                if is_input and info.get("maxInputChannels", 0) <= 0:
-                    continue
-                if (not is_input) and info.get("maxOutputChannels", 0) <= 0:
-                    continue
-                if name_keyword.lower() in str(info.get("name", "")).lower():
-                    default_logger.info(
-                        f"根据关键字 '{name_keyword}' 匹配到 {'输入' if is_input else '输出'} 设备: {info['name']} (index={i})"
-                    )
-                    return i
-        except Exception as e:
-            default_logger.warning(f"根据关键字查找音频设备失败: {e}")
-        return None
-
     def _get_default_input_device(self):
         """获取系统默认输入设备"""
         try:
@@ -568,59 +500,15 @@ class AudioDevice:
         default_logger.info(f"设备索引: {self.output_device_index}")
         default_logger.info(f"最大输出通道: {self.output_device_info['maxOutputChannels']}")
         default_logger.info(f"默认采样率: {self.output_device_info['defaultSampleRate']}")
-        default_logger.info(f"逻辑采样率(对外): {self.sample_rate}")
-        default_logger.info(f"输入设备采样率(硬件): {self.input_device_rate}")
-        default_logger.info(f"输出设备采样率(硬件): {self.output_device_rate}")
+        default_logger.info(f"音频配置: {self.sample_rate}")
         default_logger.info(f"声道数: {self.channels}")
         default_logger.info(f"块大小: {self.chunk_size}")
         default_logger.info("="*60)
     
-    def _resample_int16(self, audio_bytes: bytes, src_rate: int, dst_rate: int) -> bytes:
-        """
-        在录音/播放边界做简单的线性重采样(int16 单声道/多声道通用)
-        
-        Args:
-            audio_bytes: 原始音频数据(bytes,int16)
-            src_rate: 源采样率
-            dst_rate: 目标采样率
-        
-        Returns:
-            重采样后的音频数据(bytes,int16)
-        """
-        if (not self.enable_resample) or src_rate == dst_rate or not audio_bytes:
-            return audio_bytes
-        
-        audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-        # 多声道情况下,按 frame 维度重采样
-        if self.channels > 1:
-            audio = audio.reshape(-1, self.channels)
-            frame_count = audio.shape[0]
-            duration = frame_count / float(src_rate)
-            new_frame_count = int(round(duration * dst_rate))
-            if new_frame_count <= 0:
-                return b""
-            x_old = np.linspace(0.0, 1.0, frame_count, endpoint=False)
-            x_new = np.linspace(0.0, 1.0, new_frame_count, endpoint=False)
-            resampled = np.zeros((new_frame_count, self.channels), dtype=np.float32)
-            for ch in range(self.channels):
-                resampled[:, ch] = np.interp(x_new, x_old, audio[:, ch])
-            resampled = np.clip(resampled, -32768, 32767).astype(np.int16).reshape(-1)
-        else:
-            frame_count = audio.shape[0]
-            duration = frame_count / float(src_rate)
-            new_frame_count = int(round(duration * dst_rate))
-            if new_frame_count <= 0:
-                return b""
-            x_old = np.linspace(0.0, 1.0, frame_count, endpoint=False)
-            x_new = np.linspace(0.0, 1.0, new_frame_count, endpoint=False)
-            resampled = np.interp(x_new, x_old, audio)
-            resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-        return resampled.tobytes()
-    
     def _input_callback(self, in_data, frame_count, time_info, status):
         """录音回调函数"""
-        # if status:
-            # default_logger.info(f"输入状态: {status}")
+        if status:
+            default_logger.info(f"输入状态: {status}")
         
         # 应用回声消除(如果启用)
         if self.aec is not None:
@@ -635,8 +523,8 @@ class AudioDevice:
     
     def _output_callback(self, in_data, frame_count, time_info, status):
         """播放回调函数 - 优化版本,避免队列重建"""
-        # if status:
-            # default_logger.info(f"输出状态: {status}")
+        if status:
+            default_logger.info(f"输出状态: {status}")
         
         required_bytes = frame_count * self.channels * 2  # 2 bytes per sample (int16)
         
@@ -674,20 +562,11 @@ class AudioDevice:
     def start_streams(self):
         """启动音频输入输出流"""
         try:
-            # 设备实际工作采样率(与硬件对齐),逻辑采样率通过重采样适配
-            if self.enable_resample:
-                input_rate = self.input_device_rate
-                output_rate = self.output_device_rate
-            else:
-                # 不开启重采样时,沿用历史行为: 直接以逻辑采样率打开设备
-                input_rate = self.sample_rate
-                output_rate = self.sample_rate
-            
             # 启动输入流(录音)
             self.input_stream = self.p.open(
                 format=self.format,
                 channels=self.channels,
-                rate=input_rate,
+                rate=self.sample_rate,
                 input=True,
                 input_device_index=self.input_device_index,
                 frames_per_buffer=self.chunk_size,
@@ -698,7 +577,7 @@ class AudioDevice:
             self.output_stream = self.p.open(
                 format=self.format,
                 channels=self.channels,
-                rate=output_rate,
+                rate=self.sample_rate,
                 output=True,
                 output_device_index=self.output_device_index,
                 frames_per_buffer=self.chunk_size,
@@ -738,15 +617,9 @@ class AudioDevice:
         添加音频数据到播放队列
         
         Args:
-            audio_data: 要播放的音频数据(bytes), 采样率为 `self.sample_rate`
+            audio_data: 要播放的音频数据(bytes)
         """
-        # 对外传入的是逻辑采样率,内部根据需要重采样到设备采样率
-        data_for_device = self._resample_int16(
-            audio_data,
-            src_rate=self.sample_rate,
-            dst_rate=self.output_device_rate,
-        )
-        self.playback_queue.put(data_for_device)
+        self.playback_queue.put(audio_data)
     
     def get_recorded_data(self, block=True, timeout=None):
         """
@@ -757,17 +630,10 @@ class AudioDevice:
             timeout: 超时时间(秒)
             
         Returns:
-            录音的音频数据(bytes), 采样率为 `self.sample_rate`;
-            如果队列为空且非阻塞则返回None
+            录音的音频数据(bytes), 如果队列为空且非阻塞则返回None
         """
         try:
-            data_from_device = self.recording_queue.get(block=block, timeout=timeout)
-            # 从设备采样率重采样到逻辑采样率
-            return self._resample_int16(
-                data_from_device,
-                src_rate=self.input_device_rate,
-                dst_rate=self.sample_rate,
-            )
+            return self.recording_queue.get(block=block, timeout=timeout)
         except queue.Empty:
             return None
     
