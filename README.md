@@ -39,6 +39,9 @@ python -m g1chat.tools.doubao_tts
 python -m g1chat.tools.doubao_asrtts_asr
 python -m g1chat.tools.doubao_asrtts_asr --simulate-disconnect
 python -m g1chat.tools.doubao_asrtts_tts --count 10
+
+# 测试g1chat
+python -m g1chat.tools.g1
 ```
 ### python 启动
 
