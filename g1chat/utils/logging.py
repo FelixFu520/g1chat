@@ -4,12 +4,12 @@ from pathlib import Path
 from loguru import logger
 import logging
 
+from g1chat.utils.env import G1CHAT_WORK_DIR
+
 __all__ = [
     'Logger',
     'default_logger',
 ]
-
-G1CHAT_WORK_DIR = os.getenv("G1CHAT_WORK_DIR") if os.getenv("G1CHAT_WORK_DIR") else os.path.expanduser('~/.g1chat')
 
 
 class Logger:

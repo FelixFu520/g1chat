@@ -6,9 +6,7 @@ import asyncio
 from collections import deque
 
 from g1chat.utils.logging import default_logger
-
-G1CHAT_AUDIO_DEVICE_SPEAKER_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") else "USB"
-G1CHAT_AUDIO_DEVICE_MIC_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") else "USB"
+from g1chat.utils.env import G1CHAT_AUDIO_DEVICE_SPEAKER_NAME, G1CHAT_AUDIO_DEVICE_MIC_NAME
 
 
 class AudioEchoCancellation:

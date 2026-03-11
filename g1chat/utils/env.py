@@ -1,0 +1,6 @@
+import os
+
+
+G1CHAT_WORK_DIR = os.getenv("G1CHAT_WORK_DIR") if os.getenv("G1CHAT_WORK_DIR") else os.path.expanduser('~/.g1chat')
+G1CHAT_AUDIO_DEVICE_SPEAKER_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_SPEAKER_NAME") else "USB"
+G1CHAT_AUDIO_DEVICE_MIC_NAME = os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") if os.getenv("G1CHAT_AUDIO_DEVICE_MIC_NAME") else "USB"
