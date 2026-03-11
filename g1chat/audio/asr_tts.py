@@ -13,6 +13,7 @@ ASR和TTS集成模块
 import asyncio
 import io
 import os
+import re
 import wave
 import json
 import uuid
@@ -358,17 +359,17 @@ class ASRTTS:
         """
         将 MP3 音频数据转换为 PCM 格式
         
-        使用 pydub 库进行音频格式转换，将MP3压缩音频转换为PCM原始音频数据。
-        转换过程包括：格式转换、声道转换（转为单声道）、采样率转换、位深度转换。
-        增加了数据验证和错误处理，更好地处理流式MP3数据。
+        使用 pydub 库进行音频格式转换, 将MP3压缩音频转换为PCM原始音频数据。
+        转换过程包括: 格式转换、声道转换(转为单声道)、采样率转换、位深度转换。
+        增加了数据验证和错误处理, 更好地处理流式MP3数据。
         
         Args:
-            mp3_data: MP3 格式的音频数据（字节流）
-            target_sample_rate: 目标采样率（Hz），默认 16000 Hz
-                               需要与音频设备的采样率匹配
+            mp3_data: MP3 格式的音频数据(字节流)
+            target_sample_rate: 目标采样率(Hz), 默认 16000 Hz
+                               需要与音频设备的采样率匹配, 默认16000 Hz 
         
         Returns:
-            bytes: PCM 格式的音频数据（字节流），16位整数格式，单声道
+            bytes: PCM 格式的音频数据(字节流), 16位整数格式, 单声道
                   如果转换失败则返回空字节流 b""
         """
         # ========== 数据验证 ==========
@@ -388,7 +389,7 @@ class ASRTTS:
                         found_sync = True
                         break
                 if not found_sync:
-                    logger.warning(f"MP3数据未找到有效头部，数据长度: {len(mp3_data)}")
+                    logger.warning(f"MP3数据未找到有效头部, 数据长度: {len(mp3_data)}")
                     return b""
             
             # ========== 使用 pydub 从字节流加载 MP3 数据 ==========
@@ -414,229 +415,6 @@ class ASRTTS:
             logger.debug(f"转换MP3到PCM失败: {e}, 数据长度: {len(mp3_data)}")
             return b""  # 转换失败时返回空字节流
 
-    async def _create_websocket_connection(self):
-        """
-        创建 WebSocket 连接到 TTS 服务
-        
-        Returns:
-            websockets.WebSocketClientProtocol: WebSocket 连接对象
-            
-        Raises:
-            Exception: 连接失败时抛出异常
-        """
-        # ========== 构建 WebSocket 连接请求头 ==========
-        headers = {
-            "X-Api-App-Key": self.tts_appid,  # TTS应用ID
-            "X-Api-Access-Key": self.tts_access_token,  # TTS访问令牌
-            "X-Api-Resource-Id": (self.tts_resource_id),  # TTS资源ID（模型ID）
-            "X-Api-Connect-Id": str(uuid.uuid4()),  # 生成唯一的连接 ID
-        }
-
-        # ========== 连接到 WebSocket 服务器 ==========
-        # 参考 g1chat.tools.doubao_tts 中的实现，使用 websockets 10+ 的 extra_headers 参数
-        websocket = await websockets.connect(
-            self.tts_endpoint,
-            extra_headers=headers,  # websockets 10+ 使用 extra_headers 传递请求头
-            max_size=10 * 1024 * 1024,  # 最大消息大小10MB（用于接收音频数据）
-            ping_interval=30,  # 每30秒发送一次ping保持连接活跃
-            ping_timeout=20,   # ping超时时间20秒
-            close_timeout=10,  # 关闭连接超时时间10秒
-        )
-        # 部分 websockets 版本不暴露 response 属性，这里做兼容处理
-        try:
-            response = getattr(websocket, "response", None)
-            if response is not None:
-                resp_headers = getattr(response, "headers", None)
-                if resp_headers is not None:
-                    logid = resp_headers.get("x-tt-logid") or resp_headers.get("X-Tt-Logid")
-                    if logid:
-                        logger.info(f"TTS: 已连接到服务器, Logid: {logid}")
-        except Exception:
-            # 兼容老版本或不同实现，不强依赖 response
-            pass
-        
-        # ========== 启动连接 ==========
-        await start_connection(websocket)
-        await wait_for_event(
-            websocket, MsgType.FullServerResponse, EventType.ConnectionStarted
-        )
-        
-        return websocket
-
-    async def _close_websocket_connection(self, websocket):
-        """
-        安全关闭 WebSocket 连接
-        
-        Args:
-            websocket: WebSocket 连接对象
-        """
-        if websocket is None:
-            return
-            
-        try:
-            # ========== 清理资源：结束连接 ==========
-            await finish_connection(websocket)
-            # try:
-            #     msg = await wait_for_event(
-            #         websocket, MsgType.FullServerResponse, EventType.ConnectionFinished
-            #     )
-            # except Exception as e:
-            #     logger.warning(f"等待连接结束事件失败: {e}")
-            await websocket.close()
-            logger.info("TTS: 连接已关闭")
-        except Exception as e:
-            logger.warning(f"关闭 WebSocket 连接时出错: {e}")
-            try:
-                await websocket.close()
-            except:
-                pass
-
-    async def start_tts_processor(self):
-        """
-        启动 TTS（文本转语音）处理器
-        
-        该方法会持续运行，从 tts_queue 中读取文本，调用 TTS 服务转换为语音并实时播放。
-        使用 WebSocket 连接进行双向通信，支持流式处理（一边接收音频数据一边播放）。
-        支持自动重连机制：当连接断开时，自动重新建立连接并继续处理队列中的文本。
-        
-        工作流程：
-        1. 建立 WebSocket 连接到 TTS 服务
-        2. 持续监听队列中的文本
-        3. 对每个文本调用 TTS 服务转换为语音
-        4. 实时接收音频数据并播放（流式处理，降低延迟）
-        5. 当连接断开时，自动重连并继续处理
-        
-        Raises:
-            Exception: TTS处理过程中发生错误时抛出异常
-        """
-        # ========== 初始化异步事件 ==========
-        # 在异步上下文中创建事件，用于通知有新文本放入队列
-        if self.tts_queue_event is None:
-            self.tts_queue_event = asyncio.Event()
-        
-        self.tts_running = True  # 设置运行标志
-        
-        websocket = None
-        reconnect_delay = 1.0  # 初始重连延迟（秒）
-        max_reconnect_delay = 30.0  # 最大重连延迟（秒）
-        
-        try:
-            # ========== 主循环：支持自动重连 ==========
-            while self.tts_running:
-                try:
-                    # ========== 建立或重新建立 WebSocket 连接 ==========
-                    if websocket is None or websocket.closed:
-                        logger.info("TTS: 正在建立 WebSocket 连接...")
-                        websocket = await self._create_websocket_connection()
-                        logger.info("TTS: WebSocket 连接已建立")
-                        reconnect_delay = 1.0  # 连接成功后重置重连延迟
-
-                    # ========== 持续处理队列中的文本 ==========
-                    while self.tts_running:
-                        try:
-                            # 先检查队列，如果有数据立即处理（减少延迟）
-                            # 批量处理队列中的所有文本，确保及时响应
-                            processed_any = False
-                            current_text_data = None  # 当前正在处理的文本数据
-                            
-                            while not self.tts_queue.empty():
-                                text_data = self.tts_queue.get_nowait()
-                                if text_data:
-                                    # 提取文本内容（支持字典格式或字符串格式）
-                                    text = text_data.get("text", "") if isinstance(text_data, dict) else str(text_data)
-                                    if text:
-                                        current_text_data = text_data  # 保存当前文本数据，用于重连时重新放入队列
-                                        # logger.info(f"TTS: 处理文本: {text}")
-                                        self.tts_processing = True
-                                        await self._process_tts_text(websocket, text)
-                                        self.tts_processing = False
-                                        processed_any = True
-                                        current_text_data = None  # 处理成功后清除
-                            
-                            # 如果已经处理了文本，立即继续循环检查下一个（保持高响应性）
-                            if processed_any:
-                                continue
-                            
-                            # ========== 队列为空时，等待事件通知 ==========
-                            # 有新文本加入时会立即被唤醒，避免空转消耗CPU
-                            try:
-                                await asyncio.wait_for(self.tts_queue_event.wait(), timeout=1.0)
-                                self.tts_queue_event.clear()
-                                # 事件被触发后，立即检查队列并处理（可能有多条文本）
-                                # 上面的循环会处理所有队列中的文本
-                            except asyncio.TimeoutError:
-                                # 超时后继续循环检查（保持响应性，同时避免空转）
-                                continue
-                                
-                        except (websockets.exceptions.ConnectionClosed, 
-                                websockets.exceptions.WebSocketException,
-                                OSError) as e:
-                            # ========== 连接断开异常：准备重连 ==========
-                            logger.warning(f"TTS: WebSocket 连接断开: {e}")
-                            
-                            # 如果当前有正在处理的文本，重新放回队列
-                            if current_text_data is not None:
-                                self.tts_queue.put(current_text_data)
-                                logger.info("TTS: 将未处理的文本重新放回队列")
-                            
-                            # 关闭旧连接
-                            await self._close_websocket_connection(websocket)
-                            websocket = None
-                            
-                            # 如果还在运行，等待后重连
-                            if self.tts_running:
-                                logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
-                                await asyncio.sleep(reconnect_delay)
-                                # 指数退避：逐渐增加重连延迟，但不超过最大值
-                                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-                            break  # 跳出内层循环，重新建立连接
-                            
-                        except Exception as e:
-                            # ========== 其他异常：记录错误并继续 ==========
-                            error_msg = str(e)
-                            # 检查是否是连接相关的错误
-                            if "keepalive ping timeout" in error_msg or "connection" in error_msg.lower():
-                                logger.warning(f"TTS: 检测到连接问题: {e}")
-                                # 关闭连接并准备重连
-                                await self._close_websocket_connection(websocket)
-                                websocket = None
-                                
-                                # 如果当前有正在处理的文本，重新放回队列
-                                if current_text_data is not None:
-                                    self.tts_queue.put(current_text_data)
-                                    logger.info("TTS: 将未处理的文本重新放回队列")
-                                
-                                # 如果还在运行，等待后重连
-                                if self.tts_running:
-                                    logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
-                                    await asyncio.sleep(reconnect_delay)
-                                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-                                break  # 跳出内层循环，重新建立连接
-                            else:
-                                # 其他类型的错误，记录但继续处理
-                                logger.error(f"TTS处理队列文本失败: {e}")
-                                await asyncio.sleep(0.1)  # 出错后稍等再继续（避免错误循环）
-
-                except Exception as e:
-                    # ========== 外层异常：记录错误并尝试重连 ==========
-                    logger.error(f"TTS处理器外层循环失败: {e}")
-                    await self._close_websocket_connection(websocket)
-                    websocket = None
-                    
-                    if self.tts_running:
-                        logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
-                        await asyncio.sleep(reconnect_delay)
-                        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-
-        except Exception as e:
-            logger.error(f"TTS处理器失败: {e}")
-            raise
-        finally:
-            # ========== 清理资源 ==========
-            await self._close_websocket_connection(websocket)
-            self.tts_running = False  # 重置运行标志
-            self.tts_processing = False  # 重置处理标志
-
     async def _process_tts_text(self, websocket, text: str):
         """
         处理单个文本的 TTS 转换和播放
@@ -647,16 +425,17 @@ class ASRTTS:
         处理流程：
         1. 按句号分割文本，逐句处理
         2. 为每句话创建TTS会话
-        3. 逐字符发送文本到TTS服务（流式输入）
-        4. 并行接收音频数据并实时播放（流式输出）
+        3. 逐字符发送文本到TTS服务(流式输入)
+        4. 并行接收音频数据并实时播放(流式输出)
         
         Args:
-            websocket: WebSocket 连接对象，用于与TTS服务通信
+            websocket: WebSocket 连接对象, 用于与TTS服务通信
             text: 要转换为语音的文本内容
         """
         # ========== 按句号分割文本，逐句处理 ==========
         # 将长文本分割成多个句子，每句话单独处理，提高响应性
-        sentences = text.split("。")
+        # 使用正则表达式进行分割
+        sentences = re.split(r'[,，.。！？]', text)
         
         for sentence in sentences:
             # 跳过空句子
@@ -704,7 +483,7 @@ class ASRTTS:
                 """
                 发送文本任务（生产者）
                 
-                逐字符发送文本到TTS服务，字符间有短暂延迟，模拟自然输入。
+                逐字符发送文本到TTS服务, 字符间有短暂延迟, 模拟自然输入。
                 """
                 try:
                     for char in sentence:
@@ -742,8 +521,8 @@ class ASRTTS:
                 """
                 接收音频数据任务（生产者）
                 
-                持续从WebSocket接收音频数据消息，将音频数据放入队列。
-                当收到会话结束事件时，发送结束标记（None）到队列。
+                持续从WebSocket接收音频数据消息, 将音频数据放入队列。
+                当收到会话结束事件时, 发送结束标记(None)到队列。
                 """
                 nonlocal session_finished
                 try:
@@ -793,7 +572,7 @@ class ASRTTS:
                 """
                 播放音频数据任务（消费者）
                 
-                持续从队列取出音频数据，转换格式（如MP3转PCM）并播放。
+                持续从队列取出音频数据, 转换格式(如MP3转PCM)并播放。
                 使用缓冲策略：累积一定量的音频数据再开始播放，降低延迟。
                 """
                 mp3_buffer = bytearray()  # MP3数据缓冲区（用于累积MP3数据）
@@ -909,12 +688,236 @@ class ASRTTS:
                     # 对于其他异常，也向上抛出以便外层代码处理
                     raise
 
+    async def _close_websocket_connection(self, websocket):
+        """
+        安全关闭 WebSocket 连接
+        
+        Args:
+            websocket: WebSocket 连接对象
+        """
+        if websocket is None:
+            return
+            
+        try:
+            # ========== 清理资源：结束连接 ==========
+            await finish_connection(websocket)
+            # try:
+            #     msg = await wait_for_event(
+            #         websocket, MsgType.FullServerResponse, EventType.ConnectionFinished
+            #     )
+            # except Exception as e:
+            #     logger.warning(f"等待连接结束事件失败: {e}")
+            await websocket.close()
+            logger.info("TTS: 连接已关闭")
+        except Exception as e:
+            logger.warning(f"关闭 WebSocket 连接时出错: {e}")
+            try:
+                await websocket.close()
+            except:
+                pass
+    
+    async def _create_websocket_connection(self):
+        """
+        创建 WebSocket 连接到 TTS 服务
+        
+        Returns:
+            websockets.WebSocketClientProtocol: WebSocket 连接对象
+            
+        Raises:
+            Exception: 连接失败时抛出异常
+        """
+        # ========== 构建 WebSocket 连接请求头 ==========
+        headers = {
+            "X-Api-App-Key": self.tts_appid,  # TTS应用ID
+            "X-Api-Access-Key": self.tts_access_token,  # TTS访问令牌
+            "X-Api-Resource-Id": (self.tts_resource_id),  # TTS资源ID（模型ID）
+            "X-Api-Connect-Id": str(uuid.uuid4()),  # 生成唯一的连接 ID
+        }
+
+        # ========== 连接到 WebSocket 服务器 ==========
+        # 参考 g1chat.tools.doubao_tts 中的实现，使用 websockets 10+ 的 extra_headers 参数
+        websocket = await websockets.connect(
+            self.tts_endpoint,
+            extra_headers=headers,  # websockets 10+ 使用 extra_headers 传递请求头
+            max_size=10 * 1024 * 1024,  # 最大消息大小10MB（用于接收音频数据）
+            ping_interval=30,  # 每30秒发送一次ping保持连接活跃
+            ping_timeout=20,   # ping超时时间20秒
+            close_timeout=10,  # 关闭连接超时时间10秒
+        )
+        # 部分 websockets 版本不暴露 response 属性，这里做兼容处理
+        try:
+            response = getattr(websocket, "response", None)
+            if response is not None:
+                resp_headers = getattr(response, "headers", None)
+                if resp_headers is not None:
+                    logid = resp_headers.get("x-tt-logid") or resp_headers.get("X-Tt-Logid")
+                    if logid:
+                        logger.info(f"TTS: 已连接到服务器, Logid: {logid}")
+        except Exception:
+            # 兼容老版本或不同实现，不强依赖 response
+            pass
+        
+        # ========== 启动连接 ==========
+        await start_connection(websocket)
+        await wait_for_event(
+            websocket, MsgType.FullServerResponse, EventType.ConnectionStarted
+        )
+        
+        return websocket
+    
+    async def start_tts_processor(self):
+        """
+        启动 TTS文本转语音处理器
+        
+        该方法会持续运行，从 tts_queue 中读取文本，调用 TTS 服务转换为语音并实时播放。
+        使用 WebSocket 连接进行双向通信，支持流式处理（一边接收音频数据一边播放）。
+        支持自动重连机制：当连接断开时，自动重新建立连接并继续处理队列中的文本。
+        
+        工作流程：
+        1. 建立 WebSocket 连接到 TTS 服务
+        2. 持续监听队列中的文本
+        3. 对每个文本调用 TTS 服务转换为语音
+        4. 实时接收音频数据并播放（流式处理，降低延迟）
+        5. 当连接断开时，自动重连并继续处理
+        
+        Raises:
+            Exception: TTS处理过程中发生错误时抛出异常
+        """
+        # ========== 初始化异步事件 ==========
+        # 在异步上下文中创建事件，用于通知有新文本放入队列
+        if self.tts_queue_event is None:
+            self.tts_queue_event = asyncio.Event()
+        
+        self.tts_running = True  # 设置运行标志
+        
+        websocket = None
+        reconnect_delay = 1.0  # 初始重连延迟（秒）
+        max_reconnect_delay = 30.0  # 最大重连延迟（秒）
+        
+        try:
+            # ========== 主循环：支持自动重连 ==========
+            while self.tts_running:
+                try:
+                    # ========== 建立或重新建立 WebSocket 连接 ==========
+                    if websocket is None or websocket.closed:
+                        logger.info("TTS: 正在建立 WebSocket 连接...")
+                        websocket = await self._create_websocket_connection()
+                        logger.info("TTS: WebSocket 连接已建立")
+                        reconnect_delay = 1.0  # 连接成功后重置重连延迟
+
+                    # ========== 持续处理队列中的文本 ==========
+                    try:
+                        # 先检查队列，如果有数据立即处理（减少延迟）
+                        # 批量处理队列中的所有文本，确保及时响应
+                        processed_any = False
+                        current_text_data = None  # 当前正在处理的文本数据
+                        
+                        while not self.tts_queue.empty():
+                            text_data = self.tts_queue.get_nowait()
+                            if text_data:
+                                # 提取文本内容（支持字典格式或字符串格式）
+                                text = text_data.get("text", "") if isinstance(text_data, dict) else str(text_data)
+                                if text:
+                                    current_text_data = text_data  # 保存当前文本数据，用于重连时重新放入队列
+                                    # logger.info(f"TTS: 处理文本: {text}")
+                                    self.tts_processing = True
+                                    await self._process_tts_text(websocket, text)
+                                    self.tts_processing = False
+                                    processed_any = True
+                                    current_text_data = None  # 处理成功后清除
+                        
+                        # 如果已经处理了文本，立即继续循环检查下一个（保持高响应性）
+                        if processed_any:
+                            continue
+                        
+                        # ========== 队列为空时，等待事件通知 ==========
+                        # 有新文本加入时会立即被唤醒，避免空转消耗CPU
+                        try:
+                            await asyncio.wait_for(self.tts_queue_event.wait(), timeout=1.0)
+                            self.tts_queue_event.clear()
+                            # 事件被触发后，立即检查队列并处理（可能有多条文本）
+                            # 上面的循环会处理所有队列中的文本
+                        except asyncio.TimeoutError:
+                            # 超时后继续循环检查（保持响应性，同时避免空转）
+                            continue
+                            
+                    except (websockets.exceptions.ConnectionClosed, 
+                            websockets.exceptions.WebSocketException,
+                            OSError) as e:
+                        # ========== 连接断开异常：准备重连 ==========
+                        logger.warning(f"TTS: WebSocket 连接断开: {e}")
+                        
+                        # 如果当前有正在处理的文本，重新放回队列
+                        if current_text_data is not None:
+                            self.tts_queue.put(current_text_data)
+                            logger.info("TTS: 将未处理的文本重新放回队列")
+                        
+                        # 关闭旧连接
+                        await self._close_websocket_connection(websocket)
+                        websocket = None
+                        
+                        # 如果还在运行，等待后重连
+                        if self.tts_running:
+                            logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
+                            await asyncio.sleep(reconnect_delay)
+                            # 指数退避：逐渐增加重连延迟，但不超过最大值
+                            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                        break  # 跳出内层循环，重新建立连接
+                        
+                    except Exception as e:
+                        # ========== 其他异常：记录错误并继续 ==========
+                        error_msg = str(e)
+                        # 检查是否是连接相关的错误
+                        if "keepalive ping timeout" in error_msg or "connection" in error_msg.lower():
+                            logger.warning(f"TTS: 检测到连接问题: {e}")
+                            # 关闭连接并准备重连
+                            await self._close_websocket_connection(websocket)
+                            websocket = None
+                            
+                            # 如果当前有正在处理的文本，重新放回队列
+                            if current_text_data is not None:
+                                self.tts_queue.put(current_text_data)
+                                logger.info("TTS: 将未处理的文本重新放回队列")
+                            
+                            # 如果还在运行，等待后重连
+                            if self.tts_running:
+                                logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
+                                await asyncio.sleep(reconnect_delay)
+                                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                            break  # 跳出内层循环，重新建立连接
+                        else:
+                            # 其他类型的错误，记录但继续处理
+                            logger.error(f"TTS处理队列文本失败: {e}")
+                            await asyncio.sleep(0.1)  # 出错后稍等再继续（避免错误循环）
+
+                except Exception as e:
+                    # ========== 外层异常：记录错误并尝试重连 ==========
+                    logger.error(f"TTS处理器外层循环失败: {e}")
+                    await self._close_websocket_connection(websocket)
+                    websocket = None
+                    
+                    if self.tts_running:
+                        logger.info(f"TTS: {reconnect_delay:.1f} 秒后尝试重连...")
+                        await asyncio.sleep(reconnect_delay)
+                        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
+        except Exception as e:
+            logger.error(f"TTS处理器失败: {e}")
+            # 内部错误, 向上抛出异常
+            raise
+        finally:
+            # ========== 清理资源 ==========
+            await self._close_websocket_connection(websocket)
+            self.tts_running = False  # 重置运行标志
+            self.tts_processing = False  # 重置处理标志
+
+
     def put_tts_text(self, text: str):
         """
         将文本放入 TTS 队列
         
-        将待转换为语音的文本放入队列，TTS处理器会从队列中取出并处理。
-        这是一个线程安全的方法，可以在任何线程中调用。
+        将待转换为语音的文本放入队列, TTS处理器会从队列中取出并处理。
+        这是一个线程安全的方法, 可以在任何线程中调用。
         
         Args:
             text: 要转换为语音的文本内容
@@ -932,7 +935,7 @@ class ASRTTS:
         """
         停止 TTS 处理器
         
-        设置停止标志并唤醒TTS处理器，使其退出主循环并关闭连接。
+        设置停止标志并唤醒TTS处理器, 使其退出主循环并关闭连接。
         这是一个线程安全的方法，可以在任何线程中调用。
         """
         self.tts_running = False  # 设置停止标志
