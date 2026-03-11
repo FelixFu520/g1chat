@@ -7,6 +7,8 @@ G1Chat: 语音对话流水线
 import asyncio
 import re
 import os
+from typing import Optional
+from typing import Optional
 from openai import AsyncOpenAI
 
 from g1chat.audio.asr_tts import ASRTTS
@@ -17,7 +19,7 @@ from g1chat.utils.env import (
 )
 
 # 用于流式回复按句切分
-_SENTENCE_SPLIT = re.compile(r"([。！？\n]+)")
+_SENTENCE_SPLIT = re.compile(r"([，,。！？\n]+)")
 
 
 class G1Chat:
@@ -46,11 +48,11 @@ class G1Chat:
 
 
         self._running = False
-        self._asr_task: asyncio.Task | None = None
-        self._tts_task: asyncio.Task | None = None
-        self._pipeline_task: asyncio.Task | None = None
+        self._asr_task: Optional[asyncio.Task] = None
+        self._tts_task: Optional[asyncio.Task] = None
+        self._pipeline_task: Optional[asyncio.Task] = None
 
-    async def _call_llm(self, user_text: str) -> str:
+    async def _call_llm(self, user_text: str, asr_end_ts: Optional[float] = None) -> str:
         """
         调用 LLM 获取回复（异步流式，不阻塞事件循环）
 
@@ -63,6 +65,9 @@ class G1Chat:
         self._messages.append({"role": "user", "content": user_text})
 
         full_content: list[str] = []
+        stream_start_ts = asyncio.get_event_loop().time()
+        first_tts_ts: Optional[float] = None
+
         stream = await self._client.chat.completions.create(
             messages=self._messages,
             model=DEFAULT_MODEL,
@@ -84,13 +89,37 @@ class G1Chat:
                         sentence = (parts[i - 1] + part).strip()
                         if sentence:
                             full_content.append(sentence)
-                            self._asr_tts.put_tts_text(sentence)
+                            self._asr_tts.put_tts_text(
+                                sentence,
+                                asr_end_ts=asr_end_ts if first_tts_ts is None else None,
+                            )
+                            if first_tts_ts is None:
+                                first_tts_ts = asyncio.get_event_loop().time()
                     buffer = ""
                     continue
                 buffer = part
-        if buffer.strip():
-            full_content.append(buffer.strip())
-            self._asr_tts.put_tts_text(buffer.strip())
+        tail = buffer.strip()
+        if tail:
+            full_content.append(tail)
+            self._asr_tts.put_tts_text(
+                tail,
+                asr_end_ts=asr_end_ts if first_tts_ts is None else None,
+            )
+            if first_tts_ts is None:
+                first_tts_ts = asyncio.get_event_loop().time()
+
+        if first_tts_ts is not None:
+            llm_to_first_tts_ms = (first_tts_ts - stream_start_ts) * 1000
+            if asr_end_ts is not None:
+                asr_to_first_tts_ms = (first_tts_ts - asr_end_ts) * 1000
+                logger.info(
+                    f"LLM 请求到首句入 TTS 队列耗时: {llm_to_first_tts_ms:.1f} ms | "
+                    f"从\u201c静默判定完成\u201d到首句入 TTS 队列耗时: {asr_to_first_tts_ms:.1f} ms"
+                )
+            else:
+                logger.info(
+                    f"LLM 请求到首句入 TTS 队列耗时: {llm_to_first_tts_ms:.1f} ms"
+                )
         content = "".join(full_content) if full_content else ""
         if content:
             self._messages.append({"role": "assistant", "content": content})
@@ -119,19 +148,34 @@ class G1Chat:
                     text = result.get("text", "").strip()
                     if not text:
                         continue
-                    logger.info(f"[G1Chat] ASR 结果: {result}")
+                    end_ts = result.get("end_ts")
+                    now_ts = asyncio.get_event_loop().time()
+                    if end_ts is not None:
+                        asr_delay_ms = (now_ts - end_ts) * 1000
+                        logger.info(
+                            f"User: {result} | 从\u201c静默判定完成\u201d到出队耗时: {asr_delay_ms:.1f} ms"
+                        )
+                    else:
+                        logger.info(f"User: {result}")
 
                     try:
-                        reply = await self._call_llm(text)
-                        logger.info(f"[G1Chat] LLM 回复: {reply}")
+                        llm_start = asyncio.get_event_loop().time()
+                        reply = await self._call_llm(text, asr_end_ts=end_ts)
+                        llm_end = asyncio.get_event_loop().time()
+                        llm_cost_ms = (llm_end - llm_start) * 1000
+
+                        logger.info(
+                            f"Assistant: {reply} | "
+                            f"LLM 流式完成耗时: {llm_cost_ms:.1f} ms"
+                        )
                     except Exception as e:
-                        logger.error(f"[G1Chat] LLM 调用失败: {e}")
+                        logger.error(f"LLM 调用失败: {e}")
                         asr_tts.put_tts_text("抱歉，我这边出错了，请再说一次。")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"[G1Chat] 流水线异常: {e}")
+                logger.debug(f"流水线异常: {e}")
                 await asyncio.sleep(0.1)
 
     async def start(self):
@@ -142,7 +186,7 @@ class G1Chat:
         self._asr_task = asyncio.create_task(self._asr_tts.start_realtime_asr(silence_timeout_ms=SILENCE_TIMEOUT_MS))
         self._tts_task = asyncio.create_task(self._asr_tts.start_tts_processor())
         self._pipeline_task = asyncio.create_task(self._pipeline_loop())
-        logger.info("[G1Chat] 已启动：语音输入 -> ASR -> LLM -> TTS -> 播放")
+        logger.info("已启动：语音输入 -> ASR -> LLM -> TTS -> 播放")
 
     async def stop(self):
         """停止 ASR、流水线和 TTS 处理器，并清理音频设备。"""
@@ -164,12 +208,9 @@ class G1Chat:
         self._pipeline_task = None
         if self._asr_tts.audio_device:
             self._asr_tts.audio_device.cleanup()
-        logger.info("[G1Chat] 已停止，资源已清理")
+        logger.info("已停止，资源已清理")
 
     @property
     def asr_tts(self) -> ASRTTS:
         """底层的 ASR/TTS 实例，便于测试或扩展。"""
         return self._asr_tts
-
-
-

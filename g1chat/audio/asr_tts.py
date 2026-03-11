@@ -21,6 +21,7 @@ import copy
 from queue import Queue
 from pydub import AudioSegment
 import websockets
+from typing import Optional
 from g1chat.utils.logging import default_logger as logger
 from g1chat.audio.audio_device import AudioDevice
 from g1chat.audio.volcengine_doubao_asr import AsrWsClient
@@ -270,10 +271,11 @@ class ASRTTS:
                             if last_text_time is not None and accumulated_text and last_is_definite:
                                 elapsed_ms = (current_time - last_text_time) * 1000
                                 if elapsed_ms >= silence_timeout_ms:
-                                    # 将识别结果放入队列
+                                    # 将识别结果放入队列，并记录“静默判定完成”的时间戳
                                     result = {
                                         "text": accumulated_text,
-                                        "chat_id": self.asr_chat_id
+                                        "chat_id": self.asr_chat_id,
+                                        "end_ts": current_time,
                                     }
                                     self.asr_queue.put(result)
                                     self.asr_chat_id += 1
@@ -330,9 +332,11 @@ class ASRTTS:
                         
                         # 如果还有未处理的文本（识别结束时可能还有文本未放入队列），且is_definite为True，放入队列
                         if accumulated_text and last_is_definite:
+                            current_time = asyncio.get_event_loop().time()
                             result = {
                                 "text": accumulated_text,
-                                "chat_id": self.asr_chat_id
+                                "chat_id": self.asr_chat_id,
+                                "end_ts": current_time,
                             }
                             self.asr_queue.put(result)
                             # 通知有新结果
@@ -414,7 +418,7 @@ class ASRTTS:
             logger.debug(f"转换MP3到PCM失败: {e}, 数据长度: {len(mp3_data)}")
             return b""  # 转换失败时返回空字节流
 
-    async def _process_tts_text(self, websocket, text: str):
+    async def _process_tts_text(self, websocket, text: str, asr_end_ts: Optional[float] = None):
         """
         处理单个文本的 TTS 转换和播放
         
@@ -430,6 +434,7 @@ class ASRTTS:
         Args:
             websocket: WebSocket 连接对象, 用于与TTS服务通信
             text: 要转换为语音的文本内容
+            asr_end_ts: 对应这段文本的 ASR “静默判定完成”时间戳（秒），用于延迟统计
         """
         # 不做二次切分，调用方（_call_llm）已按句切分过，
         # 这里每段文本只建一个 TTS 会话，避免重复的 session 网络往返。
@@ -574,6 +579,7 @@ class ASRTTS:
                 """
                 mp3_buffer = bytearray()  # MP3数据缓冲区（用于累积MP3数据）
                 playback_started = False  # 是否已开始播放
+                first_play_ts: Optional[float] = None  # 首次写入音频设备的时间戳
                 min_buffer_size = 1024   # 约 1KB 即开始播放，降低首包延迟
                 mp3_convert_threshold = 2048  # 转换阈值 2KB，平衡延迟与效率
                 
@@ -594,7 +600,15 @@ class ASRTTS:
                                 if self.tts_encoding == "mp3":
                                     pcm_data = self._convert_mp3_to_pcm(bytes(mp3_buffer), self.tts_sample_rate)
                                     if pcm_data:
+                                        now_ts = asyncio.get_event_loop().time()
                                         self.audio_device.put_playback_data(pcm_data)
+                                        if first_play_ts is None:
+                                            first_play_ts = now_ts
+                                            if asr_end_ts is not None:
+                                                total_ms = (first_play_ts - asr_end_ts) * 1000
+                                                logger.info(
+                                                    f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
+                                                )
                                         # logger.info(f"TTS: 添加剩余PCM数据: {len(pcm_data)} bytes")
                                 mp3_buffer.clear()
                             break
@@ -614,7 +628,15 @@ class ASRTTS:
                             if playback_started and len(mp3_buffer) >= mp3_convert_threshold:
                                 pcm_data = self._convert_mp3_to_pcm(bytes(mp3_buffer), self.tts_sample_rate)
                                 if pcm_data:
+                                    now_ts = asyncio.get_event_loop().time()
                                     self.audio_device.put_playback_data(pcm_data)
+                                    if first_play_ts is None:
+                                        first_play_ts = now_ts
+                                        if asr_end_ts is not None:
+                                            total_ms = (first_play_ts - asr_end_ts) * 1000
+                                            logger.info(
+                                                f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
+                                            )
                                     # logger.info(f"TTS: 转换并添加PCM: {len(pcm_data)} bytes (来自{len(mp3_buffer)} MP3)")
                                     mp3_buffer.clear()
                                 else:
@@ -623,9 +645,17 @@ class ASRTTS:
                                     
                         elif self.tts_encoding == "pcm":
                             # PCM 格式：直接放入播放队列（无需转换）
+                            now_ts = asyncio.get_event_loop().time()
                             self.audio_device.put_playback_data(audio_data)
                             if not playback_started:
                                 playback_started = True
+                            if first_play_ts is None:
+                                first_play_ts = now_ts
+                                if asr_end_ts is not None:
+                                    total_ms = (first_play_ts - asr_end_ts) * 1000
+                                    logger.info(
+                                        f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
+                                    )
                             # logger.info(f"TTS: 添加PCM数据: {len(audio_data)} bytes")
                             
                 except Exception as e:
@@ -816,9 +846,10 @@ class ASRTTS:
                                 text = text_data.get("text", "") if isinstance(text_data, dict) else str(text_data)
                                 if text:
                                     current_text_data = text_data  # 保存当前文本数据，用于重连时重新放入队列
+                                    asr_end_ts = text_data.get("asr_end_ts") if isinstance(text_data, dict) else None
                                     # logger.info(f"TTS: 处理文本: {text}")
                                     self.tts_processing = True
-                                    await self._process_tts_text(websocket, text)
+                                    await self._process_tts_text(websocket, text, asr_end_ts=asr_end_ts)
                                     self.tts_processing = False
                                     processed_any = True
                                     current_text_data = None  # 处理成功后清除
@@ -908,7 +939,7 @@ class ASRTTS:
             self.tts_running = False  # 重置运行标志
             self.tts_processing = False  # 重置处理标志
 
-    def put_tts_text(self, text: str):
+    def put_tts_text(self, text: str, asr_end_ts: Optional[float] = None):
         """
         将文本放入 TTS 队列
         
@@ -917,9 +948,16 @@ class ASRTTS:
         
         Args:
             text: 要转换为语音的文本内容
+            asr_end_ts: 对应这段文本的 ASR “静默判定完成”时间戳（秒），用于延迟统计
         """
-        # 将文本和chat_id一起放入队列（字典格式）
-        self.tts_queue.put({"text": text, "chat_id": self.tts_chat_id})
+        # 将文本、chat_id 和 asr_end_ts 一起放入队列（字典格式）
+        self.tts_queue.put(
+            {
+                "text": text,
+                "chat_id": self.tts_chat_id,
+                "asr_end_ts": asr_end_ts,
+            }
+        )
         self.tts_chat_id += 1  # 递增chat_id计数器
         
         # 如果有事件对象，触发事件通知TTS处理器（唤醒等待的处理器）
