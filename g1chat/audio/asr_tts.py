@@ -79,6 +79,34 @@ class ASRTTS:
         self.tts_running = False  # TTS处理器运行状态标志
         self.tts_processing = False  # 是否正在处理某条文本（已出队但尚未播放完）
 
+    def _create_wav_chunk(self, pcm_data: bytes, sample_rate: int, channels: int) -> bytes:
+        """
+        创建WAV格式的音频数据
+        
+        将PCM原始音频数据转换为WAV格式, 添加WAV文件头信息.
+        WAV格式包含文件头采样率、声道数、位深度等和音频数据。
+        
+        Args:
+            pcm_data: PCM原始音频数据(字节流), 16位整数格式
+            sample_rate: 采样率(Hz), 如16000、44100等
+            channels: 声道数, 1=单声道, 2=立体声
+            
+        Returns:
+            bytes: 完整的WAV格式音频数据(包含文件头和数据)
+        """
+        # 创建内存缓冲区，用于存储WAV数据
+        buffer = io.BytesIO()
+        
+        # 使用wave模块写入WAV文件头和数据
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(channels)  # 设置声道数
+            wav_file.setsampwidth(2)  # 设置样本宽度为2字节（16-bit）
+            wav_file.setframerate(sample_rate)  # 设置采样率
+            wav_file.writeframes(pcm_data)  # 写入PCM音频数据
+        
+        # 返回完整的WAV文件数据（包含文件头和数据）
+        return buffer.getvalue()
+    
     async def _realtime_audio_generator(self, audio_device: AudioDevice, duration_seconds: int = None, chunk_duration_ms: int = 200):
         """
         实时音频生成器, 异步生成器
@@ -163,34 +191,6 @@ class ASRTTS:
             logger.error(f"录音生成器错误: {e}")
             # 大概率是硬件问题, 直接抛出异常
             raise
-    
-    def _create_wav_chunk(self, pcm_data: bytes, sample_rate: int, channels: int) -> bytes:
-        """
-        创建WAV格式的音频数据
-        
-        将PCM原始音频数据转换为WAV格式, 添加WAV文件头信息.
-        WAV格式包含文件头采样率、声道数、位深度等和音频数据。
-        
-        Args:
-            pcm_data: PCM原始音频数据(字节流), 16位整数格式
-            sample_rate: 采样率(Hz), 如16000、44100等
-            channels: 声道数, 1=单声道, 2=立体声
-            
-        Returns:
-            bytes: 完整的WAV格式音频数据(包含文件头和数据)
-        """
-        # 创建内存缓冲区，用于存储WAV数据
-        buffer = io.BytesIO()
-        
-        # 使用wave模块写入WAV文件头和数据
-        with wave.open(buffer, 'wb') as wav_file:
-            wav_file.setnchannels(channels)  # 设置声道数
-            wav_file.setsampwidth(2)  # 设置样本宽度为2字节（16-bit）
-            wav_file.setframerate(sample_rate)  # 设置采样率
-            wav_file.writeframes(pcm_data)  # 写入PCM音频数据
-        
-        # 返回完整的WAV文件数据（包含文件头和数据）
-        return buffer.getvalue()
 
     async def start_realtime_asr(self, duration_seconds: int = None, silence_timeout_ms: int = 600):
         """
