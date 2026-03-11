@@ -1,13 +1,13 @@
 """
-ASR（自动语音识别）和 TTS（文本转语音）集成模块
+ASR和TTS集成模块
 
 该模块提供了实时语音识别和文本转语音的功能，支持：
-- 实时音频流式识别（ASR）
-- 文本转语音播放（TTS）
-- 音频格式转换（MP3转PCM）
+- 实时音频流式识别
+- 文本转语音播放
+- 音频格式转换
 - 队列管理和异步处理
 
-使用火山引擎（Volcengine）的语音服务进行ASR和TTS处理。
+使用火山引擎的语音服务进行ASR和TTS处理。
 """
 
 import asyncio
@@ -48,27 +48,24 @@ class ASRTTS:
     """
     def __init__(self):
         """
-        初始化ASR和TTS集成类
+        初始化ASRTTS类
         
-        初始化音频设备、ASR客户端配置和TTS客户端配置，并启动音频流。
-        所有配置参数都针对火山引擎语音服务进行了优化。
+        初始化音频设备、ASR客户端配置和TTS客户端配置, 并启动音频流, 所有配置参数都针对火山引擎语音服务进行了优化
         """
         # ========== 音频设备配置 ==========
         # 初始化音频设备，用于录音和播放
-        self.audio_device = AudioDevice(
-            enable_aec=True     # 启用回声消除（实时ASR测试时可以关闭）
-        )
+        self.audio_device = AudioDevice()
         # 启动音频设备的录音和播放流
         self.audio_device.start_streams()
 
-        # ========== ASR（语音识别）客户端配置 ==========
+        # ========== ASR客户端配置 ==========
         self.asr_url = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"  # ASR WebSocket服务地址
         self.asr_seg_duration = 200  # ASR分段时长（毫秒），每200ms发送一次音频数据
         self.asr_queue = Queue()  # ASR识别结果队列，存储识别到的文本
         self.asr_queue_event = None  # 异步事件，用于通知有新识别结果放入队列（在异步上下文中创建）
         self.asr_chat_id = 1  # ASR chat_id 计数器，用于标识不同的识别会话
 
-        # ========== TTS（文本转语音）客户端配置 ==========
+        # ========== TTS客户端配置 ==========
         self.tts_queue = Queue()  # TTS文本队列，存储待转换为语音的文本
         self.tts_queue_event = None  # 异步事件，用于通知有新文本放入队列（在异步上下文中创建）
         self.tts_chat_id = 1  # TTS chat_id 计数器，用于标识不同的TTS会话
@@ -84,18 +81,18 @@ class ASRTTS:
 
     async def _realtime_audio_generator(self, audio_device: AudioDevice, duration_seconds: int = None, chunk_duration_ms: int = 200):
         """
-        实时音频生成器（异步生成器）
+        实时音频生成器, 异步生成器
         
-        从AudioDevice持续录音，将PCM音频数据转换为WAV格式，并按指定时长分块产生音频片段。
-        用于实时ASR识别，支持流式处理。
+        从AudioDevice持续录音, 将PCM音频数据转换为WAV格式, 并按指定时长分块产生音频片段.
+        用于实时ASR识别, 支持流式处理.
         
         Args:
-            audio_device: AudioDevice实例，用于获取录音数据
-            duration_seconds: 录音时长(秒)，None表示无限录音直到手动停止
-            chunk_duration_ms: 每个音频片段的时长(毫秒)，默认200ms，用于控制发送频率
+            audio_device: AudioDevice实例, 用于获取录音数据
+            duration_seconds: 录音时长(秒), None表示无限录音直到手动停止
+            chunk_duration_ms: 每个音频片段的时长(毫秒), 默认200ms, 用于控制发送频率
             
         Yields:
-            bytes: WAV格式的音频数据片段，最后yield None表示音频流结束
+            bytes: WAV格式的音频数据片段, 最后yield None表示音频流结束
             
         Raises:
             Exception: 录音过程中发生错误时抛出异常
@@ -164,22 +161,23 @@ class ASRTTS:
             
         except Exception as e:
             logger.error(f"录音生成器错误: {e}")
+            # 大概率是硬件问题, 直接抛出异常
             raise
     
     def _create_wav_chunk(self, pcm_data: bytes, sample_rate: int, channels: int) -> bytes:
         """
         创建WAV格式的音频数据
         
-        将PCM原始音频数据转换为WAV格式，添加WAV文件头信息。
-        WAV格式包含文件头（采样率、声道数、位深度等）和音频数据。
+        将PCM原始音频数据转换为WAV格式, 添加WAV文件头信息.
+        WAV格式包含文件头采样率、声道数、位深度等和音频数据。
         
         Args:
-            pcm_data: PCM原始音频数据（字节流），16位整数格式
-            sample_rate: 采样率（Hz），如16000、44100等
-            channels: 声道数，1=单声道，2=立体声
+            pcm_data: PCM原始音频数据(字节流), 16位整数格式
+            sample_rate: 采样率(Hz), 如16000、44100等
+            channels: 声道数, 1=单声道, 2=立体声
             
         Returns:
-            bytes: 完整的WAV格式音频数据（包含文件头和数据）
+            bytes: 完整的WAV格式音频数据(包含文件头和数据)
         """
         # 创建内存缓冲区，用于存储WAV数据
         buffer = io.BytesIO()
@@ -196,19 +194,20 @@ class ASRTTS:
 
     async def start_realtime_asr(self, duration_seconds: int = None, silence_timeout_ms: int = 600):
         """
-        启动实时ASR（自动语音识别）识别
+        启动实时ASR自动语音识别
         
-        持续录音并实时识别语音，将识别结果放入队列。
-        使用静音超时机制：当超过指定时间没有识别到新文字时，将累积的文本放入队列。
+        持续录音并实时识别语音, 将识别结果放入队列.
+        使用静音超时机制: 当超过指定时间没有识别到新文字时, 将累积的文本放入队列.
+        这样可以实现自动分段, 将一句话识别完成后立即放入队列.
         
         Args:
-            duration_seconds: 录音时长(秒)，None表示无限录音直到手动停止
-            silence_timeout_ms: 静音超时时间(毫秒)，默认800ms
-                               当超过此时间没有识别到新文字时，将当前累积的识别结果放入队列
-                               这样可以实现自动分段，将一句话识别完成后立即放入队列
+            duration_seconds: 录音时长(秒), None表示无限录音直到手动停止
+            silence_timeout_ms: 静音超时时间(毫秒), 默认600ms
+                               当超过此时间没有识别到新文字时, 将当前累积的识别结果放入队列
+                               这样可以实现自动分段, 将一句话识别完成后立即放入队列
                                
         Raises:
-            Exception: ASR识别过程中发生错误时抛出异常
+            Exception: ASR识别过程中发生错误时抛出异常   
         """
         # ========== 初始化异步事件 ==========
         # 在异步上下文中创建事件，用于通知有新识别结果
@@ -221,14 +220,19 @@ class ASRTTS:
             audio_stream = self._realtime_audio_generator(
                 self.audio_device,
                 duration_seconds=duration_seconds,
-                chunk_duration_ms=200  # 每200ms发送一次音频数据
+                chunk_duration_ms=self.asr_seg_duration  # 每200ms发送一次音频数据
             )
-            
+        except Exception as e:
+            logger.error(f"启动实时ASR失败: 创建实时音频生成器失败: {e}")
+            # 大概率是硬件问题, 直接抛出异常
+            raise
+
+        try:
             # ========== 创建ASR客户端并进行实时识别 ==========
             async with AsrWsClient(self.asr_url, self.asr_seg_duration) as asr_client:
                 # ========== 跟踪识别状态 ==========
                 last_text_time = None  # 最后一次收到识别文本的时间戳
-                accumulated_text = ""  # 累积的识别文本（ASR服务会返回完整的累积文本）
+                accumulated_text = ""  # 累积的识别文本, ASR服务会返回完整的累积文本
                 last_is_definite = False  # 最后一次识别结果的确定状态
                 
                 # ========== 创建超时检查任务 ==========
@@ -237,8 +241,8 @@ class ASRTTS:
                     """
                     超时检查任务
                     
-                    每100ms检查一次，如果超过silence_timeout_ms没有收到新文本，
-                    且有累积文本且is_definite为True，则将结果放入队列并重置状态。
+                    每100ms检查一次, 如果超过silence_timeout_ms没有收到新文本, 
+                    且有累积文本且is_definite为True, 则将结果放入队列并重置状态.
                     """
                     nonlocal last_text_time, accumulated_text, last_is_definite
                     while True:
@@ -294,10 +298,10 @@ class ASRTTS:
                                 last_is_definite = is_definite  # 更新确定状态
                                 
                                 # logger.debug(f"收到识别文本: {text}, is_definite: {is_definite}")
-                
                 except Exception as e:
                     logger.error(f"实时ASR处理失败: {e}")
-                    raise
+                    # 可能是网络问题, 不需要抛出异常
+                    pass
                 finally:
                     # ========== 清理资源 ==========
                     # 取消超时检查任务
@@ -318,10 +322,10 @@ class ASRTTS:
                         # 通知有新结果
                         self.asr_queue_event.set()
                         # logger.info(f"识别结束，将剩余结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
-                        
         except Exception as e:
             logger.error(f"启动实时ASR失败: {e}")
-            raise
+            # 可能是网络问题, 不需要抛出异常
+            pass
 
     def _convert_mp3_to_pcm(self, mp3_data: bytes, target_sample_rate: int = 16000) -> bytes:
         """

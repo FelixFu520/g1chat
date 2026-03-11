@@ -5,12 +5,12 @@ import asyncio
 
 async def monitor_queue(asr_tts: ASRTTS):
     """
-    监控ASR队列，完成一次识别后显示队列内容（不删除队列内容）
+    监控ASR队列, 完成一次识别后显示队列内容(不删除队列内容)
     
     Args:
         asr_tts: ASRTTS实例
     """
-    print("开始监控ASR队列...")
+    logger.info("开始监控ASR队列...")
     
     # 确保事件已创建
     if asr_tts.asr_queue_event is None:
@@ -40,10 +40,9 @@ async def monitor_queue(asr_tts: ASRTTS):
                 
                 # 打印所有结果
                 if temp_results:
-                    print(f"\n[队列内容] 共有 {len(temp_results)} 条结果:")
+                    logger.info(f"\n[队列内容] 共有 {len(temp_results)} 条结果:")
                     for i, result in enumerate(temp_results, 1):
-                        print(f"  {i}. chat_id: {result['chat_id']}, text: {result['text']}")
-                        # logger.info(f"队列结果 {i}: {result}")
+                        logger.info(f"  {i}. chat_id: {result['chat_id']}, text: {result['text']}")
                     
                     # 将所有元素放回队列（保持原有顺序）
                     for result in temp_results:
@@ -79,9 +78,6 @@ async def main():
         
         # 启动实时ASR识别
         await asr_tts.start_realtime_asr(silence_timeout_ms=args.silence_timeout)
-        
-        # ASR识别完成后，等待一小段时间让队列中的结果被处理
-        # await asyncio.sleep(1.0)
         
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在停止...")
