@@ -30,7 +30,7 @@ def convert_mp3_to_wav(src: Path, dst: Path, sample_rate: int = 16000, channels:
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError as e:
-        raise RuntimeError("未找到 ffmpeg，请先在系统中安装 ffmpeg。") from e
+        raise RuntimeError("未找到 ffmpeg, 请先在系统中安装 ffmpeg") from e
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode(errors="ignore") if e.stderr else ""
         raise RuntimeError(f"ffmpeg 转换失败: {stderr}") from e

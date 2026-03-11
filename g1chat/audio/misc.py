@@ -10,12 +10,9 @@ from g1chat.audio.volcengine_doubao_asr import AsrWsClient
 from g1chat.utils.logging import default_logger as logger
 
 
-def record_and_playback(
-    duration: float = 5.0,
-    enable_aec: bool = False,
-    monitor: bool = True,
-) -> None:
-    """使用 AudioDevice 录音一段时间：
+def record_and_playback(duration: float = 5.0, enable_aec: bool = False, monitor: bool = True,) -> None:
+    """
+    使用 AudioDevice 录音一段时间：
     1. 实时从扬声器监听
     2. 同时把录音内容保存为 WAV 文件
     """
@@ -23,7 +20,7 @@ def record_and_playback(
 
     try:
         device.start_streams()
-        print(f"开始录音并实时回放 {duration} 秒，请对着麦克风说话...")
+        logger.info(f"开始录音并实时回放 {duration} 秒，请对着麦克风说话...")
 
         frames = []  # 经过限幅后的录音数据，用于最终保存
 
@@ -80,7 +77,7 @@ def record_and_playback(
             limited_int16 = np.clip(audio_f, -32768, 32767).astype(np.int16)
             frames.append(limited_int16.tobytes())
 
-        print(f"录音结束，期间采集到 {len(frames)} 个音频块（已实时回放）。")
+        logger.info(f"录音结束，期间采集到 {len(frames)} 个音频块（已实时回放）。")
 
         # 把录音内容保存为 WAV 文件（使用设备当前的采样率 / 通道 / 采样位宽）
         if frames:
@@ -95,57 +92,134 @@ def record_and_playback(
 
             bytes_per_second = 2 * device.channels * device.sample_rate
             approx_seconds = len(all_data) / bytes_per_second if bytes_per_second > 0 else 0
-            print(
+            logger.info(
                 f"录音内容已保存到: {filepath} "
                 f"(按 header 估算时长约 {approx_seconds:.2f} 秒, sample_rate={device.sample_rate})"
             )
         else:
-            print("未采集到任何音频数据，未生成录音文件。")
+            logger.info("未采集到任何音频数据，未生成录音文件。")
 
     finally:
         device.cleanup()
 
 
-async def test_file_asr(args):
+async def test_file_asr(url: str, seg_duration: int, file: str):
     """
     测试文件ASR识别
     
     Args:
-        args: 命令行参数对象，包含以下属性：
-            url: WebSocket服务器URL
-            seg_duration: 音频片段时长(毫秒)
-            file: 音频文件路径
+        url: WebSocket服务器URL
+        seg_duration: 音频片段时长(毫秒)
+        file: 音频文件路径
     """
     logger.info("=== 测试文件ASR ===")
     
     # 创建ASR客户端并执行文件识别
-    async with AsrWsClient(args.url, args.seg_duration) as client:
+    async with AsrWsClient(url, seg_duration) as client:
         try:
             # 遍历识别结果
-            async for response in client.execute(args.file):
+            async for response in client.execute(file):
                 # 检查响应中是否包含识别文本
                 if "text" in response.to_dict()['payload_msg']['result']:
                     result = response.to_dict()['payload_msg']['result']
                     text = result['text']
                     # 获取识别结果的确定状态
                     is_definite = result['utterances'][0]['definite']
-                    print(f"{text}   {is_definite}")
+                    logger.info(f"{text}   {is_definite}")
         except Exception as e:
             logger.error(f"ASR processing failed: {e}")
 
 
-async def realtime_audio_generator(audio_device, duration_seconds=10, chunk_duration_ms=200, sample_rate=16000):
+def resample_pcm(pcm_data, src_rate, dst_rate, channels):
     """
-    实时音频生成器，从AudioDevice录音并产生音频片段
+    使用线性插值将int16 PCM数据从src_rate重采样到dst_rate。
+
+    Args:
+        pcm_data: 原始PCM数据(bytes), int16格式
+        src_rate: 原始采样率
+        dst_rate: 目标采样率
+        channels: 声道数
+
+    Returns:
+        重采样后的PCM数据(bytes), int16格式
+    """
+    if src_rate == dst_rate or not pcm_data:
+        return pcm_data
+
+    audio = np.frombuffer(pcm_data, dtype=np.int16)
+
+    if channels > 1:
+        # [num_samples * channels] -> [num_frames, channels]
+        num_frames = audio.size // channels
+        if num_frames == 0:
+            return b""
+        audio = audio[: num_frames * channels].reshape(num_frames, channels)
+    else:
+        if audio.size == 0:
+            return b""
+        num_frames = audio.size
+        audio = audio.reshape(num_frames, 1)
+
+    src_len = audio.shape[0]
+    dst_len = max(1, int(round(src_len * dst_rate / src_rate)))
+
+    # 构造时间轴，使用线性插值进行重采样
+    x_old = np.linspace(0.0, 1.0, src_len, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, dst_len, endpoint=False)
+
+    resampled = np.empty((dst_len, channels), dtype=np.float32)
+    for ch in range(channels):
+        resampled[:, ch] = np.interp(x_new, x_old, audio[:, ch].astype(np.float32))
+
+    # 限幅并转换回int16
+    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+
+    if channels == 1:
+        resampled = resampled.reshape(-1)
+
+    return resampled.tobytes()
+
+
+def create_wav_chunk(pcm_data, sample_rate, channels):
+    """
+    创建WAV格式的音频数据
+    
+    Args:
+        pcm_data: PCM原始音频数据(bytes)
+        sample_rate: 采样率(Hz)
+        channels: 声道数
+        
+    Returns:
+        WAV格式的音频数据(bytes)
+    """
+    import io
+    
+    # 创建内存缓冲区
+    buffer = io.BytesIO()
+    
+    # 写入WAV文件头和数据
+    with wave.open(buffer, 'wb') as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)  # 16-bit，每个样本2字节
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    
+    # 返回完整的WAV文件数据
+    return buffer.getvalue()
+
+
+async def realtime_audio_generator(audio_device: AudioDevice, duration_seconds: int = 10, chunk_duration_ms: int = 200, sample_rate: int = 16000):
+    """
+    实时音频生成器, 从AudioDevice录音并产生音频片段
     
     Args:
         audio_device: AudioDevice实例
-        duration_seconds: 录音时长(秒)，None表示无限录音
+        duration_seconds: 录音时长(秒), None表示无限录音
         chunk_duration_ms: 每个音频片段的时长(毫秒)
-        sample_rate: 目标采样率(Hz)，None表示使用AudioDevice的采样率
+        sample_rate: 目标采样率(Hz), None表示使用AudioDevice的采样率
         
     Yields:
-        音频数据片段(bytes)，WAV格式
+        音频数据片段(bytes), WAV格式
     """
     # 获取音频设备参数
     device_sample_rate = audio_device.sample_rate
@@ -234,93 +308,14 @@ async def realtime_audio_generator(audio_device, duration_seconds=10, chunk_dura
         raise
 
 
-def resample_pcm(pcm_data, src_rate, dst_rate, channels):
-    """
-    使用线性插值将int16 PCM数据从src_rate重采样到dst_rate。
-
-    Args:
-        pcm_data: 原始PCM数据(bytes)，int16格式
-        src_rate: 原始采样率
-        dst_rate: 目标采样率
-        channels: 声道数
-
-    Returns:
-        重采样后的PCM数据(bytes)，int16格式
-    """
-    if src_rate == dst_rate or not pcm_data:
-        return pcm_data
-
-    audio = np.frombuffer(pcm_data, dtype=np.int16)
-
-    if channels > 1:
-        # [num_samples * channels] -> [num_frames, channels]
-        num_frames = audio.size // channels
-        if num_frames == 0:
-            return b""
-        audio = audio[: num_frames * channels].reshape(num_frames, channels)
-    else:
-        if audio.size == 0:
-            return b""
-        num_frames = audio.size
-        audio = audio.reshape(num_frames, 1)
-
-    src_len = audio.shape[0]
-    dst_len = max(1, int(round(src_len * dst_rate / src_rate)))
-
-    # 构造时间轴，使用线性插值进行重采样
-    x_old = np.linspace(0.0, 1.0, src_len, endpoint=False)
-    x_new = np.linspace(0.0, 1.0, dst_len, endpoint=False)
-
-    resampled = np.empty((dst_len, channels), dtype=np.float32)
-    for ch in range(channels):
-        resampled[:, ch] = np.interp(x_new, x_old, audio[:, ch].astype(np.float32))
-
-    # 限幅并转换回int16
-    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-
-    if channels == 1:
-        resampled = resampled.reshape(-1)
-
-    return resampled.tobytes()
-
-
-def create_wav_chunk(pcm_data, sample_rate, channels):
-    """
-    创建WAV格式的音频数据
-    
-    Args:
-        pcm_data: PCM原始音频数据(bytes)
-        sample_rate: 采样率(Hz)
-        channels: 声道数
-        
-    Returns:
-        WAV格式的音频数据(bytes)
-    """
-    import io
-    
-    # 创建内存缓冲区
-    buffer = io.BytesIO()
-    
-    # 写入WAV文件头和数据
-    with wave.open(buffer, 'wb') as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(2)  # 16-bit，每个样本2字节
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_data)
-    
-    # 返回完整的WAV文件数据
-    return buffer.getvalue()
-
-
-async def test_realtime_asr(args):
+async def test_realtime_asr(url: str, seg_duration: int, duration: int):
     """
     测试实时录音ASR识别
     
     Args:
-        args: 命令行参数对象，包含以下属性：
-            url: WebSocket服务器URL
-            seg_duration: 音频片段时长(毫秒)
-            duration: 录音时长(秒)
+        url: WebSocket服务器URL
+        seg_duration: 音频片段时长(毫秒)
+        duration: 录音时长(秒)
     """
     logger.info("=== 测试实时录音ASR ===")
     
@@ -333,17 +328,17 @@ async def test_realtime_asr(args):
     
     try:
         # 启动音频输入流
-        audio_device.start_streams()
-        logger.info(f"开始录音，时长: {args.duration} 秒")
+        audio_device.start_streams()        
+        logger.info(f"开始录音，时长: {duration} 秒")
         logger.info("请开始说话...")
         
         # 创建ASR客户端并开始识别
-        async with AsrWsClient(args.url, args.seg_duration) as client:
+        async with AsrWsClient(url, seg_duration) as client:
             # 创建实时音频生成器，将录音数据转换为WAV格式片段
             audio_stream = realtime_audio_generator(
                 audio_device,
-                duration_seconds=args.duration,
-                chunk_duration_ms=args.seg_duration
+                duration_seconds=duration,
+                chunk_duration_ms=seg_duration
             )
             
             # 开始实时ASR识别，处理音频流
@@ -361,7 +356,7 @@ async def test_realtime_asr(args):
                             text = result['text']
                             # 获取识别结果的确定状态（是否为最终结果）
                             is_definite = result.get('utterances', [{}])[0].get('definite', False) if result.get('utterances') else False
-                            print(f"[{'确定' if is_definite else '临时'}] {text}")
+                            logger.info(f"[{'确定' if is_definite else '临时'}] {text}")
                             
             except Exception as e:
                 logger.error(f"实时ASR处理失败: {e}")
