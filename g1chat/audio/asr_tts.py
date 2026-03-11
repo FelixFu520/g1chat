@@ -199,6 +199,7 @@ class ASRTTS:
         持续录音并实时识别语音, 将识别结果放入队列.
         使用静音超时机制: 当超过指定时间没有识别到新文字时, 将累积的文本放入队列.
         这样可以实现自动分段, 将一句话识别完成后立即放入队列.
+        支持断网自动重连: 当WebSocket连接断开时, 等待后自动重新建立连接并继续识别.
         
         Args:
             duration_seconds: 录音时长(秒), None表示无限录音直到手动停止
@@ -213,119 +214,138 @@ class ASRTTS:
         # 在异步上下文中创建事件，用于通知有新识别结果
         if self.asr_queue_event is None:
             self.asr_queue_event = asyncio.Event()
-        
-        try:
-            # ========== 创建实时音频生成器 ==========
-            # 从音频设备持续获取音频数据，转换为WAV格式并分块发送
-            audio_stream = self._realtime_audio_generator(
-                self.audio_device,
-                duration_seconds=duration_seconds,
-                chunk_duration_ms=self.asr_seg_duration  # 每200ms发送一次音频数据
-            )
-        except Exception as e:
-            logger.error(f"启动实时ASR失败: 创建实时音频生成器失败: {e}")
-            # 大概率是硬件问题, 直接抛出异常
-            raise
 
-        try:
-            # ========== 创建ASR客户端并进行实时识别 ==========
-            async with AsrWsClient(self.asr_url, self.asr_seg_duration) as asr_client:
-                # ========== 跟踪识别状态 ==========
-                last_text_time = None  # 最后一次收到识别文本的时间戳
-                accumulated_text = ""  # 累积的识别文本, ASR服务会返回完整的累积文本
-                last_is_definite = False  # 最后一次识别结果的确定状态
-                
-                # ========== 创建超时检查任务 ==========
-                # 后台任务：定期检查是否超过静音超时时间，如果是则将结果放入队列
-                async def check_timeout():
-                    """
-                    超时检查任务
+        # ========== 断网重连参数 ==========
+        reconnect_delay = 1.0   # 初始重连延迟（秒）
+        max_reconnect_delay = 30.0  # 最大重连延迟（秒）
+        start_time = asyncio.get_event_loop().time()
+
+        # ========== 主循环：支持自动重连 ==========
+        while True:
+            # 检查是否达到录音时长限制
+            if duration_seconds is not None:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= duration_seconds:
+                    break
+
+            try:
+                # ========== 创建实时音频生成器 ==========
+                # 从音频设备持续获取音频数据，转换为WAV格式并分块发送
+                audio_stream = self._realtime_audio_generator(
+                    self.audio_device,
+                    duration_seconds=duration_seconds,
+                    chunk_duration_ms=self.asr_seg_duration  # 每200ms发送一次音频数据
+                )
+            except Exception as e:
+                logger.error(f"启动实时ASR失败: 创建实时音频生成器失败: {e}")
+                # 大概率是硬件问题, 直接抛出异常
+                raise
+
+            try:
+                # ========== 创建ASR客户端并进行实时识别 ==========
+                async with AsrWsClient(self.asr_url, self.asr_seg_duration) as asr_client:
+                    # ========== 跟踪识别状态 ==========
+                    last_text_time = None  # 最后一次收到识别文本的时间戳
+                    accumulated_text = ""  # 累积的识别文本, ASR服务会返回完整的累积文本
+                    last_is_definite = False  # 最后一次识别结果的确定状态
                     
-                    每100ms检查一次, 如果超过silence_timeout_ms没有收到新文本, 
-                    且有累积文本且is_definite为True, 则将结果放入队列并重置状态.
-                    """
-                    nonlocal last_text_time, accumulated_text, last_is_definite
-                    while True:
-                        await asyncio.sleep(0.1)  # 每100ms检查一次（10Hz检查频率）
-                        current_time = asyncio.get_event_loop().time()
+                    # ========== 创建超时检查任务 ==========
+                    # 后台任务：定期检查是否超过静音超时时间，如果是则将结果放入队列
+                    async def check_timeout():
+                        """
+                        超时检查任务
                         
-                        # 如果超过静音超时时间没有收到新文本，且有累积文本且is_definite为True，则放入队列
-                        if last_text_time is not None and accumulated_text and last_is_definite:
-                            elapsed_ms = (current_time - last_text_time) * 1000
-                            if elapsed_ms >= silence_timeout_ms:
-                                # 将识别结果放入队列
-                                result = {
-                                    "text": accumulated_text,
-                                    "chat_id": self.asr_chat_id
-                                }
-                                self.asr_queue.put(result)
-                                self.asr_chat_id += 1
-
-                                # 通知有新结果（唤醒等待队列的代码）
-                                self.asr_queue_event.set()
-                                # logger.info(f"超时({elapsed_ms:.0f}ms)未识别到新文字，将结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
-                                
-                                # 重置状态，准备接收下一段识别文本
-                                accumulated_text = ""
-                                last_text_time = None
-                                last_is_definite = False
-                
-                # 启动超时检查任务（后台运行）
-                timeout_task = asyncio.create_task(check_timeout())
-                
-                try:
-                    # ========== 处理ASR响应流 ==========
-                    # 从ASR客户端接收识别结果（流式处理）
-                    async for response in asr_client.execute_stream(audio_stream):
-                        # 解析响应数据为字典格式
-                        resp_dict = response.to_dict()
-                        
-                        # 检查响应中是否包含识别结果
-                        if resp_dict.get('payload_msg') and 'result' in resp_dict['payload_msg']:
-                            result = resp_dict['payload_msg']['result']
+                        每100ms检查一次, 如果超过silence_timeout_ms没有收到新文本, 
+                        且有累积文本且is_definite为True, 则将结果放入队列并重置状态.
+                        """
+                        nonlocal last_text_time, accumulated_text, last_is_definite
+                        while True:
+                            await asyncio.sleep(0.1)  # 每100ms检查一次（10Hz检查频率）
+                            current_time = asyncio.get_event_loop().time()
                             
-                            # 如果包含识别文本（ASR服务返回的文本是累积的完整文本）
-                            if 'text' in result:
-                                text = result['text']
-                                current_time = asyncio.get_event_loop().time()
-                                
-                                # 获取识别结果的确定状态（是否为最终结果）
-                                is_definite = result.get('utterances', [{}])[0].get('definite', False) if result.get('utterances') else False
-                                
-                                # 更新累积文本（使用最新的完整文本，ASR会不断更新完整文本）
-                                accumulated_text = text
-                                last_text_time = current_time  # 更新最后收到文本的时间
-                                last_is_definite = is_definite  # 更新确定状态
-                                
-                                # logger.debug(f"收到识别文本: {text}, is_definite: {is_definite}")
-                except Exception as e:
-                    logger.error(f"实时ASR处理失败: {e}")
-                    # 可能是网络问题, 不需要抛出异常
-                    pass
-                finally:
-                    # ========== 清理资源 ==========
-                    # 取消超时检查任务
-                    timeout_task.cancel()
-                    try:
-                        await timeout_task
-                    except asyncio.CancelledError:
-                        # 任务正常取消，忽略异常
-                        pass
+                            # 如果超过静音超时时间没有收到新文本，且有累积文本且is_definite为True，则放入队列
+                            if last_text_time is not None and accumulated_text and last_is_definite:
+                                elapsed_ms = (current_time - last_text_time) * 1000
+                                if elapsed_ms >= silence_timeout_ms:
+                                    # 将识别结果放入队列
+                                    result = {
+                                        "text": accumulated_text,
+                                        "chat_id": self.asr_chat_id
+                                    }
+                                    self.asr_queue.put(result)
+                                    self.asr_chat_id += 1
+
+                                    # 通知有新结果（唤醒等待队列的代码）
+                                    self.asr_queue_event.set()
+                                    # logger.info(f"超时({elapsed_ms:.0f}ms)未识别到新文字，将结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
+                                    
+                                    # 重置状态，准备接收下一段识别文本
+                                    accumulated_text = ""
+                                    last_text_time = None
+                                    last_is_definite = False
                     
-                    # 如果还有未处理的文本（识别结束时可能还有文本未放入队列），且is_definite为True，放入队列
-                    if accumulated_text and last_is_definite:
-                        result = {
-                            "text": accumulated_text,
-                            "chat_id": self.asr_chat_id
-                        }
-                        self.asr_queue.put(result)
-                        # 通知有新结果
-                        self.asr_queue_event.set()
-                        # logger.info(f"识别结束，将剩余结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
-        except Exception as e:
-            logger.error(f"启动实时ASR失败: {e}")
-            # 可能是网络问题, 不需要抛出异常
-            pass
+                    # 启动超时检查任务（后台运行）
+                    timeout_task = asyncio.create_task(check_timeout())
+                    
+                    try:
+                        # ========== 处理ASR响应流 ==========
+                        # 从ASR客户端接收识别结果（流式处理）
+                        async for response in asr_client.execute_stream(audio_stream):
+                            # 解析响应数据为字典格式
+                            resp_dict = response.to_dict()
+                            
+                            # 检查响应中是否包含识别结果
+                            if resp_dict.get('payload_msg') and 'result' in resp_dict['payload_msg']:
+                                result = resp_dict['payload_msg']['result']
+                                
+                                # 如果包含识别文本（ASR服务返回的文本是累积的完整文本）
+                                if 'text' in result:
+                                    text = result['text']
+                                    current_time = asyncio.get_event_loop().time()
+                                    
+                                    # 获取识别结果的确定状态（是否为最终结果）
+                                    is_definite = result.get('utterances', [{}])[0].get('definite', False) if result.get('utterances') else False
+                                    
+                                    # 更新累积文本（使用最新的完整文本，ASR会不断更新完整文本）
+                                    accumulated_text = text
+                                    last_text_time = current_time  # 更新最后收到文本的时间
+                                    last_is_definite = is_definite  # 更新确定状态
+                                    
+                                    # logger.debug(f"收到识别文本: {text}, is_definite: {is_definite}")
+                    except Exception as e:
+                        logger.error(f"实时ASR处理失败: {e}")
+                        # 可能是网络问题, 不需要抛出异常，外层循环会处理重连
+                    finally:
+                        # ========== 清理资源 ==========
+                        # 取消超时检查任务
+                        timeout_task.cancel()
+                        try:
+                            await timeout_task
+                        except asyncio.CancelledError:
+                            # 任务正常取消，忽略异常
+                            pass
+                        
+                        # 如果还有未处理的文本（识别结束时可能还有文本未放入队列），且is_definite为True，放入队列
+                        if accumulated_text and last_is_definite:
+                            result = {
+                                "text": accumulated_text,
+                                "chat_id": self.asr_chat_id
+                            }
+                            self.asr_queue.put(result)
+                            # 通知有新结果
+                            self.asr_queue_event.set()
+                            # logger.info(f"识别结束，将剩余结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
+
+                # ========== 正常结束（duration_seconds 限制到时）==========
+                # execute_stream 正常退出说明音频流已结束，无需重连
+                break
+
+            except Exception as e:
+                logger.warning(f"实时ASR连接断开或发生错误: {e}, {reconnect_delay:.1f}秒后尝试重连...")
+                await asyncio.sleep(reconnect_delay)
+                # 指数退避：逐渐增加重连延迟，但不超过最大值
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+                logger.info("实时ASR正在重新连接...")
 
     def _convert_mp3_to_pcm(self, mp3_data: bytes, target_sample_rate: int = 16000) -> bytes:
         """

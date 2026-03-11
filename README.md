@@ -37,7 +37,8 @@ python -m g1chat.tools.doubao_tts
 
 # 测试集合豆包ASR—TTS的类
 python -m g1chat.tools.doubao_asrtts_asr
- python -m g1chat.tools.doubao_asrtts_tts --count 10
+python -m g1chat.tools.doubao_asrtts_asr --simulate-disconnect
+python -m g1chat.tools.doubao_asrtts_tts --count 10
 ```
 ### python 启动
 
