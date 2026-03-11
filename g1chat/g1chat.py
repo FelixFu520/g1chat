@@ -77,7 +77,8 @@ class G1Chat:
         first_chunk_sent = False    # LLM流式回复首片段是否已发送到TTS队列中, 用于判断是否需要发送首片段, 如果已发送则不发送首片段
         first_buf = ""              # LLM流式回复首片段缓冲区, 用于累积首片段内容, 用于拼接首片段内容
         buffer = ""                 # LLM流式回复缓冲区(去除first_buf后的内容), 用于累积LLM流式回复内容, 用于拼接LLM流式回复内容
-        MIN_FIRST_CHARS = 4         # 首片段最少字符数, 首片段最少字符数，尽量小以换取更快响应
+        MIN_FIRST_CHARS = 8         # 首片段最少字符数, 首片段最少字符数，尽量小以换取更快响应
+        started_tts_session = False # 标记本次 LLM 回复是否已经为 TTS 启动过一次“中断+新会话”
 
         stream = await self._client.chat.completions.create(
             messages=self._messages,
@@ -111,6 +112,11 @@ class G1Chat:
                         full_content.append(sentence)
                         # 如果LLM回复类型是音频, 则直接发送给TTS队列
                         if llm_response_type == "audio":
+                            # 新的一轮 LLM 回复到来时, 先中断之前未播完的语音,
+                            # 再把当前回复送入 TTS 队列（只在本轮第一次触发）
+                            if not started_tts_session:
+                                self._asr_tts.interrupt_tts()
+                                started_tts_session = True
                             self._asr_tts.put_tts_text(sentence, asr_end_ts=asr_end_ts)
                         first_tts_ts = asyncio.get_event_loop().time()
                         first_chunk_sent = True
@@ -131,7 +137,13 @@ class G1Chat:
                         if sentence:
                             full_content.append(sentence)
                             if llm_response_type == "audio":
-                                self._asr_tts.put_tts_text(sentence, asr_end_ts=asr_end_ts if first_tts_ts is None else None,)  # 如果没有经过first_chunk_sent, 就没有first_tts_ts, 则asr_end_ts作为asr_end_ts
+                                if not started_tts_session:
+                                    self._asr_tts.interrupt_tts()
+                                    started_tts_session = True
+                                self._asr_tts.put_tts_text(
+                                    sentence,
+                                    asr_end_ts=asr_end_ts if first_tts_ts is None else None,
+                                )  # 如果没有经过first_chunk_sent, 就没有first_tts_ts, 则asr_end_ts作为asr_end_ts
                             if first_tts_ts is None:
                                 first_tts_ts = asyncio.get_event_loop().time()
                     buffer = ""
@@ -150,7 +162,13 @@ class G1Chat:
         if tail:
             full_content.append(tail)
             if llm_response_type == "audio":
-                self._asr_tts.put_tts_text(tail, asr_end_ts=asr_end_ts if first_tts_ts is None else None,)
+                if not started_tts_session:
+                    self._asr_tts.interrupt_tts()
+                    started_tts_session = True
+                self._asr_tts.put_tts_text(
+                    tail,
+                    asr_end_ts=asr_end_ts if first_tts_ts is None else None,
+                )
             if first_tts_ts is None:
                 first_tts_ts = asyncio.get_event_loop().time()
 

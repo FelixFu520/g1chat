@@ -678,6 +678,10 @@ class AudioDevice:
             except queue.Empty:
                 break
     
+    def clear_playback_buffer(self):
+        """清空当前播放缓冲数据"""
+        self.playback_buffer.clear()
+    
     def clear_recording_queue(self):
         """清空录音队列"""
         while not self.recording_queue.empty():

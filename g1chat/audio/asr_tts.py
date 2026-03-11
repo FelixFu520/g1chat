@@ -83,6 +83,8 @@ class ASRTTS:
         self.tts_sample_rate = self.audio_device.sample_rate  # TTS播放采样率（Hz）
         self.tts_running = False  # TTS处理器运行状态标志
         self.tts_processing = False  # 是否正在处理某条文本（已出队但尚未播放完）
+        # 用于支持中断播放：每次开始一段新的“对话回复”时自增
+        self.tts_generation = 0
 
     def _create_wav_chunk(self, pcm_data: bytes, sample_rate: int, channels: int) -> bytes:
         """
@@ -421,7 +423,7 @@ class ASRTTS:
             logger.debug(f"转换MP3到PCM失败: {e}, 数据长度: {len(mp3_data)}")
             return b""  # 转换失败时返回空字节流
 
-    async def _process_tts_text(self, websocket, text: str, asr_end_ts: Optional[float] = None):
+    async def _process_tts_text(self, websocket, text: str, asr_end_ts: Optional[float] = None, generation_id: Optional[int] = None):
         """
         处理单个文本的 TTS 转换和播放
         
@@ -438,7 +440,12 @@ class ASRTTS:
             websocket: WebSocket 连接对象, 用于与TTS服务通信
             text: 要转换为语音的文本内容
             asr_end_ts: 对应这段文本的 ASR “静默判定完成”时间戳（秒），用于延迟统计
+            generation_id: 当前TTS会话的generation_id, 用于标识当前TTS会话是否为旧会话, 如果为旧会话, 则不播放音频数据
         """
+        # 如果未显式传入，则使用当前 generation
+        if generation_id is None:
+            generation_id = self.tts_generation
+
         # 不做二次切分，调用方（_call_llm）已按句切分过，
         # 这里每段文本只建一个 TTS 会话，避免重复的 session 网络往返。
         sentences = [text]
@@ -588,6 +595,9 @@ class ASRTTS:
                 min_buffer_size = 512    # 约 0.5KB 即开始播放
                 mp3_convert_threshold = 1024  # 转换阈值 1KB，进一步降低延迟
                 
+                # 一旦检测到当前会话属于“旧 generation”，后续音频只丢弃不播放，
+                # 但仍然要持续消费队列，直到服务器正常结束该会话，避免协议异常。
+                discard_only = False
                 try:
                     while True:
                         # 从队列中获取音频数据，设置超时避免无限等待
@@ -599,9 +609,10 @@ class ASRTTS:
                         
                         # ========== 检查是否收到结束标记 ==========
                         if audio_data is None:
-                            # 会话结束，转换并播放剩余的 MP3 数据
-                            if len(mp3_buffer) > 0:
-                                # logger.info(f"TTS: 会话结束,转换剩余MP3数据 {len(mp3_buffer)} bytes")
+                            # 会话结束：
+                            # - 如果没有被中断(discard_only=False)，播放剩余缓冲；
+                            # - 如果已中断(discard_only=True)，直接丢弃剩余缓冲。
+                            if not discard_only and len(mp3_buffer) > 0:
                                 if self.tts_encoding == "mp3":
                                     pcm_data = self._convert_mp3_to_pcm(bytes(mp3_buffer), self.tts_sample_rate)
                                     if pcm_data:
@@ -614,23 +625,26 @@ class ASRTTS:
                                                 logger.info(
                                                     f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
                                                 )
-                                        # logger.info(f"TTS: 添加剩余PCM数据: {len(pcm_data)} bytes")
                                 mp3_buffer.clear()
                             break
+                        
+                        # 一旦检测到当前会话已经属于“旧 generation”，切换到只丢弃模式
+                        if generation_id != self.tts_generation:
+                            discard_only = True
                         
                         # ========== 处理音频数据 ==========
                         if self.tts_encoding == "mp3":
                             # MP3 格式：需要转换为PCM才能播放
-                            # 累积 MP3 数据到缓冲区
-                            mp3_buffer.extend(audio_data)
+                            # 累积 MP3 数据到缓冲区（仅在未中断时）
+                            if not discard_only:
+                                mp3_buffer.extend(audio_data)
                             
                             # 检查是否达到最小缓冲大小，开始播放（降低延迟）
-                            if not playback_started and len(mp3_buffer) >= min_buffer_size:
-                                # logger.info(f"TTS: MP3缓冲已满({len(mp3_buffer)} bytes),开始播放")
+                            if not discard_only and not playback_started and len(mp3_buffer) >= min_buffer_size:
                                 playback_started = True
                             
                             # 批量转换策略：累积足够的 MP3 数据再转换（提高转换效率）
-                            if playback_started and len(mp3_buffer) >= mp3_convert_threshold:
+                            if not discard_only and playback_started and len(mp3_buffer) >= mp3_convert_threshold:
                                 pcm_data = self._convert_mp3_to_pcm(bytes(mp3_buffer), self.tts_sample_rate)
                                 if pcm_data:
                                     now_ts = asyncio.get_event_loop().time()
@@ -650,17 +664,18 @@ class ASRTTS:
                                     
                         elif self.tts_encoding == "pcm":
                             # PCM 格式：直接放入播放队列（无需转换）
-                            now_ts = asyncio.get_event_loop().time()
-                            self.audio_device.put_playback_data(audio_data)
-                            if not playback_started:
-                                playback_started = True
-                            if first_play_ts is None:
-                                first_play_ts = now_ts
-                                if asr_end_ts is not None:
-                                    total_ms = (first_play_ts - asr_end_ts) * 1000
-                                    logger.info(
-                                        f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
-                                    )
+                            if not discard_only:
+                                now_ts = asyncio.get_event_loop().time()
+                                self.audio_device.put_playback_data(audio_data)
+                                if not playback_started:
+                                    playback_started = True
+                                if first_play_ts is None:
+                                    first_play_ts = now_ts
+                                    if asr_end_ts is not None:
+                                        total_ms = (first_play_ts - asr_end_ts) * 1000
+                                        logger.info(
+                                            f"从“静默判定完成”到首个音频写入设备耗时: {total_ms:.1f} ms"
+                                        )
                             # logger.info(f"TTS: 添加PCM数据: {len(audio_data)} bytes")
                             
                 except Exception as e:
@@ -854,7 +869,9 @@ class ASRTTS:
                                     asr_end_ts = text_data.get("asr_end_ts") if isinstance(text_data, dict) else None
                                     # logger.info(f"TTS: 处理文本: {text}")
                                     self.tts_processing = True
-                                    await self._process_tts_text(websocket, text, asr_end_ts=asr_end_ts)
+                                    # 记录当前 generation，供内部判断是否被中断
+                                    current_generation = self.tts_generation
+                                    await self._process_tts_text(websocket, text, asr_end_ts=asr_end_ts, generation_id=current_generation)
                                     self.tts_processing = False
                                     processed_any = True
                                     current_text_data = None  # 处理成功后清除
@@ -969,6 +986,35 @@ class ASRTTS:
         if self.tts_queue_event:
             self.tts_queue_event.set()
         # logger.info(f"TTS: 文本已放入队列: {text}, chat_id: {self.tts_chat_id - 1}")
+
+    def interrupt_tts(self):
+        """
+        中断当前 TTS 播放:
+        - 清空 TTS 文本队列
+        - 清空底层音频播放队列和缓冲
+        - 自增 generation, 让正在进行的 TTS 流尽快感知并退出
+        """
+        # 自增 generation，标记之前的所有 TTS 流为“过期”
+        self.tts_generation += 1
+
+        # 清空待播报的文本队列
+        while not self.tts_queue.empty():
+            try:
+                self.tts_queue.get_nowait()
+            except Exception:
+                break
+
+        # 清空底层播放队列和缓冲
+        if self.audio_device:
+            try:
+                self.audio_device.clear_playback_queue()
+                self.audio_device.clear_playback_buffer()
+            except Exception:
+                pass
+
+        # 触发事件, 让处理协程尽快醒来检查 generation
+        if self.tts_queue_event:
+            self.tts_queue_event.set()
 
     def stop_tts_processor(self):
         """
