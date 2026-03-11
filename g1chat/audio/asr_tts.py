@@ -216,8 +216,11 @@ class ASRTTS:
             self.asr_queue_event = asyncio.Event()
 
         # ========== 断网重连参数 ==========
-        reconnect_delay = 1.0   # 初始重连延迟（秒）
-        max_reconnect_delay = 30.0  # 最大重连延迟（秒）
+        # 为了在实时对话场景下尽快恢复识别，这里采用“短间隔 + 多次快速重试”的策略，
+        # 而不是长时间指数退避，避免在临时网络抖动时等待过久。
+        reconnect_delay = 0.3   # 初始重连延迟（秒），缩短首个重连等待时间
+        max_reconnect_delay = 2.0  # 最大重连延迟（秒），限制指数退避上限
+        reconnect_attempts = 0  # 连续重连次数计数
         start_time = asyncio.get_event_loop().time()
 
         # ========== 主循环：支持自动重连 ==========
@@ -341,9 +344,13 @@ class ASRTTS:
                 break
 
             except Exception as e:
-                logger.warning(f"实时ASR连接断开或发生错误: {e}, {reconnect_delay:.1f}秒后尝试重连...")
+                reconnect_attempts += 1
+                logger.warning(
+                    f"实时ASR连接断开或发生错误(第{reconnect_attempts}次重连): {e}, "
+                    f"{reconnect_delay:.1f}秒后尝试重连..."
+                )
                 await asyncio.sleep(reconnect_delay)
-                # 指数退避：逐渐增加重连延迟，但不超过最大值
+                # 指数退避：逐渐增加重连延迟，但不超过最大值，保证在抖动场景下重连足够快
                 reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                 logger.info("实时ASR正在重新连接...")
 

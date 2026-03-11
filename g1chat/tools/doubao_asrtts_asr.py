@@ -215,7 +215,7 @@ async def main():
     parser.add_argument("--silence-timeout", type=int, default=600,
                        help="静音超时时间(毫秒)，默认: 600")
     parser.add_argument("--simulate-disconnect", action="store_true",
-                       help="模拟断网场景（直接关闭 WebSocket，无需 root 权限）")
+                       help="模拟断网场景（直接关闭 WebSocket, 无需 root 权限）")
     parser.add_argument("--disconnect-after", type=float, default=5.0,
                        help="断网模拟：正常运行多少秒后触发断网，默认: 5.0")
     parser.add_argument("--disconnect-duration", type=float, default=1.0,
