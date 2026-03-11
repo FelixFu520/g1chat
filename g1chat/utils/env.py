@@ -19,5 +19,6 @@ DEFAULT_MODEL = os.getenv("G1CHAT_DEFAULT_MODEL") if os.getenv("G1CHAT_DEFAULT_M
 ARK_API_KEY = os.getenv("ARK_API_KEY") if os.getenv("ARK_API_KEY") else ""
 ARK_BASE_URL = os.getenv("ARK_BASE_URL") if os.getenv("ARK_BASE_URL") else "https://ark.cn-beijing.volces.com/api/v3"
 
-# ASR & TTS
-SILENCE_TIMEOUT_MS = os.getenv("SILENCE_TIMEOUT_MS") if os.getenv("SILENCE_TIMEOUT_MS") else 600
+# ASR & TTS（静默超时：判定“一句话结束”的等待时间，默认 400ms，可通过 SILENCE_TIMEOUT_MS 覆盖）
+_silence = os.getenv("SILENCE_TIMEOUT_MS")
+SILENCE_TIMEOUT_MS = int(_silence) if _silence else 400

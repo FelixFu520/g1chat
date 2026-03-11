@@ -7,7 +7,7 @@ G1Chat: 语音对话流水线
 import asyncio
 import re
 import os
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from g1chat.audio.asr_tts import ASRTTS
 from g1chat.utils.logging import default_logger as logger
@@ -37,7 +37,7 @@ class G1Chat:
         self._asr_tts = ASRTTS()
 
         # 初始化 LLM 客户端
-        self._client = OpenAI(api_key=ARK_API_KEY, base_url=ARK_BASE_URL)
+        self._client = AsyncOpenAI(api_key=ARK_API_KEY, base_url=ARK_BASE_URL)
 
         # 多轮对话历史
         self._messages: list[dict[str, str]] = [
@@ -50,9 +50,9 @@ class G1Chat:
         self._tts_task: asyncio.Task | None = None
         self._pipeline_task: asyncio.Task | None = None
 
-    def _call_llm(self, user_text: str) -> str:
+    async def _call_llm(self, user_text: str) -> str:
         """
-        调用 LLM 获取回复
+        调用 LLM 获取回复（异步流式，不阻塞事件循环）
 
         Args:
             user_text: 用户输入文本(ASR 结果)
@@ -63,14 +63,14 @@ class G1Chat:
         self._messages.append({"role": "user", "content": user_text})
 
         full_content: list[str] = []
-        stream = self._client.chat.completions.create(
+        stream = await self._client.chat.completions.create(
             messages=self._messages,
             model=DEFAULT_MODEL,
             stream=True,
             extra_body={"thinking": {"type": "disabled"}},
         )
         buffer = ""
-        for chunk in stream:
+        async for chunk in stream:
             delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
             if not delta:
                 continue
@@ -122,7 +122,7 @@ class G1Chat:
                     logger.info(f"[G1Chat] ASR 结果: {result}")
 
                     try:
-                        reply = self._call_llm(text)
+                        reply = await self._call_llm(text)
                         logger.info(f"[G1Chat] LLM 回复: {reply}")
                     except Exception as e:
                         logger.error(f"[G1Chat] LLM 调用失败: {e}")

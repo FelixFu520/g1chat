@@ -61,7 +61,7 @@ class ASRTTS:
 
         # ========== ASR客户端配置 ==========
         self.asr_url = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"  # ASR WebSocket服务地址
-        self.asr_seg_duration = 200  # ASR分段时长（毫秒），每200ms发送一次音频数据
+        self.asr_seg_duration = 150  # ASR分段时长（毫秒），每150ms发送一次，更早送首包
         self.asr_queue = Queue()  # ASR识别结果队列，存储识别到的文本
         self.asr_queue_event = None  # 异步事件，用于通知有新识别结果放入队列（在异步上下文中创建）
         self.asr_chat_id = 1  # ASR chat_id 计数器，用于标识不同的识别会话
@@ -193,7 +193,7 @@ class ASRTTS:
             # 大概率是硬件问题, 直接抛出异常
             raise
 
-    async def start_realtime_asr(self, duration_seconds: int = None, silence_timeout_ms: int = 600):
+    async def start_realtime_asr(self, duration_seconds: int = None, silence_timeout_ms: int = 400):
         """
         启动实时ASR自动语音识别
         
@@ -204,9 +204,8 @@ class ASRTTS:
         
         Args:
             duration_seconds: 录音时长(秒), None表示无限录音直到手动停止
-            silence_timeout_ms: 静音超时时间(毫秒), 默认600ms
+            silence_timeout_ms: 静音超时时间(毫秒), 默认400ms，可通过 SILENCE_TIMEOUT_MS 环境变量覆盖
                                当超过此时间没有识别到新文字时, 将当前累积的识别结果放入队列
-                               这样可以实现自动分段, 将一句话识别完成后立即放入队列
                                
         Raises:
             Exception: ASR识别过程中发生错误时抛出异常   
@@ -259,12 +258,12 @@ class ASRTTS:
                         """
                         超时检查任务
                         
-                        每100ms检查一次, 如果超过silence_timeout_ms没有收到新文本, 
+                        每50ms检查一次, 如果超过silence_timeout_ms没有收到新文本,
                         且有累积文本且is_definite为True, 则将结果放入队列并重置状态.
                         """
                         nonlocal last_text_time, accumulated_text, last_is_definite
                         while True:
-                            await asyncio.sleep(0.1)  # 每100ms检查一次（10Hz检查频率）
+                            await asyncio.sleep(0.05)  # 每50ms检查一次，更快判定句结束
                             current_time = asyncio.get_event_loop().time()
                             
                             # 如果超过静音超时时间没有收到新文本，且有累积文本且is_definite为True，则放入队列
@@ -432,13 +431,11 @@ class ASRTTS:
             websocket: WebSocket 连接对象, 用于与TTS服务通信
             text: 要转换为语音的文本内容
         """
-        # ========== 按句号分割文本，逐句处理 ==========
-        # 将长文本分割成多个句子，每句话单独处理，提高响应性
-        # 使用正则表达式进行分割
-        sentences = re.split(r'[,，.。！？]', text)
+        # 不做二次切分，调用方（_call_llm）已按句切分过，
+        # 这里每段文本只建一个 TTS 会话，避免重复的 session 网络往返。
+        sentences = [text]
         
         for sentence in sentences:
-            # 跳过空句子
             if not sentence.strip():
                 continue
 
@@ -493,7 +490,7 @@ class ASRTTS:
                         await task_request(
                             websocket, json.dumps(synthesis_request).encode(), session_id
                         )
-                        await asyncio.sleep(0.005)  # 字符间延迟 5ms（模拟自然输入速度）
+                        # 不再加延迟，尽快送齐文本以降低 TTS 首包延迟
 
                     # 发送会话结束请求（通知TTS服务文本发送完成）
                     await finish_session(websocket, session_id)
@@ -577,8 +574,8 @@ class ASRTTS:
                 """
                 mp3_buffer = bytearray()  # MP3数据缓冲区（用于累积MP3数据）
                 playback_started = False  # 是否已开始播放
-                min_buffer_size = 2048  # 最小 MP3 缓冲大小（约 2KB，降低延迟）
-                mp3_convert_threshold = 2048  # MP3 转换阈值（累积到2KB再转换，平衡延迟和效率）
+                min_buffer_size = 1024   # 约 1KB 即开始播放，降低首包延迟
+                mp3_convert_threshold = 2048  # 转换阈值 2KB，平衡延迟与效率
                 
                 try:
                     while True:
