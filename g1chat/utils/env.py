@@ -24,6 +24,7 @@ if os.path.exists(G1CHAT_HOOKS_PATH):
         hooks = {}
         for k, v in _hooks.items():
             if k == "control_hooks" or k == "control_signals":
+                hooks[k] = v
                 continue
             hooks[k] = sorted(v, key=lambda x: x["order"])
 else:
