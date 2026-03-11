@@ -255,8 +255,20 @@ class G1Chat:
                         self._asr_tts.put_tts_text(response_text)
                         continue
 
+
+                    is_asr_hook_found = False
                     for hook in G1CHAT_HOOKS["asr_hooks"]:
-                        if hook['name'] == text.strip().lower():
+                        if hook['relate'] == "and":
+                            if all(name.lower() in text.strip().lower() for name in hook['name']):
+                                is_asr_hook_found = True
+                            else:
+                                is_asr_hook_found = False
+                        elif hook['relate'] == "or":
+                            if any(name.lower() in text.strip().lower() for name in hook['name']):
+                                is_asr_hook_found = True
+                            else:
+                                is_asr_hook_found = False
+                        if is_asr_hook_found:
                             if G1CHAT_LANGUAGE == "zh":
                                 response_text = hook['response_zh']
                             else:
@@ -264,9 +276,11 @@ class G1Chat:
                             self._asr_tts.put_tts_text(response_text)
 
                             self.text_queue.put(hook["signal"])
-                        
+                            is_asr_hook_found = True
                             break
-                        
+
+                    if is_asr_hook_found:
+                        continue
 
 
                     try:
