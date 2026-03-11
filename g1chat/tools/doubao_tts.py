@@ -12,6 +12,10 @@ import copy
 import json
 import uuid
 import os
+import os
+import asyncio
+import io
+from pydub import AudioSegment
 
 from g1chat.audio.volcengine_doubao_tts import (
     EventType,
@@ -26,7 +30,54 @@ from g1chat.audio.volcengine_doubao_tts import (
 )
 from g1chat.audio.audio_device import AudioDevice
 from g1chat.utils.logging import default_logger as logger
-from g1chat.audio.misc import convert_mp3_to_pcm
+
+
+def convert_mp3_to_pcm(mp3_data: bytes, target_sample_rate: int = 16000) -> bytes:
+    """
+    将 MP3 音频数据转换为 PCM 格式
+    
+    Args:
+        mp3_data: MP3 格式的音频数据（字节流）
+        target_sample_rate: 目标采样率，默认 16000 Hz
+    
+    Returns:
+        PCM 格式的音频数据（字节流），如果转换失败则返回空字节流
+    """
+    try:
+        # 使用 pydub 从字节流加载 MP3 数据
+        audio = AudioSegment.from_file(io.BytesIO(mp3_data), format="mp3")
+        
+        # 转换为单声道
+        audio = audio.set_channels(1)
+        
+        # 转换采样率到目标采样率
+        audio = audio.set_frame_rate(target_sample_rate)
+        
+        # 转换为 16 位 PCM（2 字节 = 16 位）
+        audio = audio.set_sample_width(2)
+        
+        # 获取原始 PCM 数据
+        pcm_data = audio.raw_data
+        
+        return pcm_data
+    except Exception as e:
+        logger.error(f"转换MP3到PCM失败: {e}")
+        return b""
+
+
+def get_resource_id(voice: str) -> str:
+    """
+    根据语音类型获取资源 ID
+    
+    Args:
+        voice: 语音类型字符串，如果以 "S_" 开头则使用默认资源，否则使用服务类型资源
+    
+    Returns:
+        资源 ID 字符串
+    """
+    if voice.startswith("S_"):
+        return "volc.megatts.default"
+    return "volc.service_type.10029"
 
 
 async def main():
