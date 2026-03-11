@@ -57,6 +57,7 @@ class G1Chat:
         self._asr_task: Optional[asyncio.Task] = None # ASR 任务
         self._tts_task: Optional[asyncio.Task] = None # TTS 任务
         self._pipeline_task: Optional[asyncio.Task] = None # 流水线任务
+        self._control_task: Optional[asyncio.Task] = None # 控制任务
 
     async def _call_llm(self, user_text: str, asr_end_ts: Optional[float] = None) -> str:
         """
@@ -385,6 +386,7 @@ class G1Chat:
         self._asr_task = asyncio.create_task(self._asr_tts.start_realtime_asr(silence_timeout_ms=G1CHAT_SILENCE_TIMEOUT_MS))
         self._tts_task = asyncio.create_task(self._asr_tts.start_tts_processor())
         self._pipeline_task = asyncio.create_task(self._pipeline_loop())
+        self._control_task = asyncio.create_task(self._control_loop())
         logger.info("已启动：语音输入 -> ASR -> LLM -> TTS -> 播放")
 
     async def stop(self):
@@ -394,7 +396,7 @@ class G1Chat:
         if self._asr_tts.asr_queue_event:
             self._asr_tts.asr_queue_event.set()
 
-        for task in (self._pipeline_task, self._asr_task, self._tts_task):
+        for task in (self._pipeline_task, self._asr_task, self._tts_task, self._control_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -405,9 +407,43 @@ class G1Chat:
         self._asr_task = None
         self._tts_task = None
         self._pipeline_task = None
+        self._control_task = None
         if self._asr_tts.audio_device:
             self._asr_tts.audio_device.cleanup()
         logger.info("已停止，资源已清理")
+
+    async def _control_loop(self):
+        """
+        控制协程：从控制队列取信号 -> 执行控制。
+        """
+        if "control_hooks" not in G1CHAT_HOOKS or len(G1CHAT_HOOKS["control_hooks"]) == 0:
+            if G1CHAT_LANGUAGE == "zh":
+                response_text = "请正确配置控制信号的钩子"
+            else:
+                response_text = "Please configure the control_hooks correctly"
+            self._asr_tts.put_tts_text(response_text)
+
+        control_signals = G1CHAT_HOOKS["control_signals"]
+
+        while self._running:
+            try:
+                # Queue 是同步队列, 这里通过线程池避免阻塞事件循环
+                loop = asyncio.get_event_loop()
+                control_signal = await loop.run_in_executor(None, self.control_queue.get)
+                if not control_signal:
+                    continue
+
+                if control_signal in control_signals:
+                    if G1CHAT_LANGUAGE == "zh":
+                        response_text = G1CHAT_HOOKS["control_hooks"][control_signal]["response_zh"]
+                    else:
+                        response_text = G1CHAT_HOOKS["control_hooks"][control_signal]["response_en"]
+                    self._asr_tts.put_tts_text(response_text)
+
+                await asyncio.sleep(0.1) # 等待0.1秒, 避免频繁读取控制队列
+
+            except asyncio.CancelledError:
+                break
 
     @property
     def asr_tts(self) -> ASRTTS:
