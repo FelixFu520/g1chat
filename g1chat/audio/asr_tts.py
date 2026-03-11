@@ -75,8 +75,10 @@ class ASRTTS:
         self.tts_access_token = os.getenv("TTS_ACCESS_KEY")  # TTS访问令牌（从环境变量获取）
         self.tts_resource_id = "seed-tts-2.0"  # TTS资源ID，指定使用的TTS模型
         self.tts_voice_type = "zh_male_m191_uranus_bigtts"  # TTS语音类型（中文男声）
-        self.tts_encoding = "mp3"  # TTS音频编码格式（mp3或pcm）
+        # 使用 PCM 直接播放，避免 MP3 解码延迟
+        self.tts_encoding = "pcm"  # TTS音频编码格式（mp3或pcm）
         self.tts_endpoint = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"  # TTS WebSocket服务地址
+        # 让 TTS 采样率与本地音频设备保持一致，避免重采样
         self.tts_sample_rate = self.audio_device.sample_rate  # TTS播放采样率（Hz）
         self.tts_running = False  # TTS处理器运行状态标志
         self.tts_processing = False  # 是否正在处理某条文本（已出队但尚未播放完）
@@ -451,19 +453,20 @@ class ASRTTS:
                     "uid": str(uuid.uuid4()),  # 生成唯一用户ID
                 },
                 "namespace": "BidirectionalTTS",  # TTS命名空间
-                "req_params": {
-                    "speaker": self.tts_voice_type,  # 语音类型（如：中文男声）
-                    "audio_params": {
-                        "format": self.tts_encoding,  # 音频编码格式（mp3或pcm）
-                        "sample_rate": 24000,  # 服务器端采样率（TTS服务使用的采样率）
-                        "enable_timestamp": True,  # 启用时间戳
+                    "req_params": {
+                        "speaker": self.tts_voice_type,  # 语音类型（如：中文男声）
+                        "audio_params": {
+                            "format": self.tts_encoding,  # 音频编码格式（mp3或pcm）
+                            # 使用与本地播放一致的采样率，减少额外处理
+                            "sample_rate": self.tts_sample_rate,
+                            "enable_timestamp": True,  # 启用时间戳
+                        },
+                        "additions": json.dumps(
+                            {
+                                "disable_markdown_filter": False,  # 不禁用Markdown过滤
+                            }
+                        ),
                     },
-                    "additions": json.dumps(
-                        {
-                            "disable_markdown_filter": False,  # 不禁用Markdown过滤
-                        }
-                    ),
-                },
             }
 
             # ========== 启动TTS会话 ==========
@@ -580,8 +583,9 @@ class ASRTTS:
                 mp3_buffer = bytearray()  # MP3数据缓冲区（用于累积MP3数据）
                 playback_started = False  # 是否已开始播放
                 first_play_ts: Optional[float] = None  # 首次写入音频设备的时间戳
-                min_buffer_size = 1024   # 约 1KB 即开始播放，降低首包延迟
-                mp3_convert_threshold = 2048  # 转换阈值 2KB，平衡延迟与效率
+                # 更激进的缓冲策略：更少的 MP3 数据就开始解码和播放，以降低首包延迟
+                min_buffer_size = 512    # 约 0.5KB 即开始播放
+                mp3_convert_threshold = 1024  # 转换阈值 1KB，进一步降低延迟
                 
                 try:
                     while True:

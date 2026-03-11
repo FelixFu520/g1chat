@@ -67,6 +67,10 @@ class G1Chat:
         full_content: list[str] = []
         stream_start_ts = asyncio.get_event_loop().time()
         first_tts_ts: Optional[float] = None
+        first_chunk_sent = False
+        first_buf = ""
+        # 首片段最少字符数，尽量小以换取更快响应
+        MIN_FIRST_CHARS = 4
 
         stream = await self._client.chat.completions.create(
             messages=self._messages,
@@ -79,6 +83,26 @@ class G1Chat:
             delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
             if not delta:
                 continue
+
+            # 首包快速首发：在还没有发送过任何 TTS 文本之前，
+            # 只要累计到一定长度的内容就立即送入 TTS 队列，而不等待标点。
+            if not first_chunk_sent:
+                first_buf += delta
+                if len(first_buf.strip()) >= MIN_FIRST_CHARS:
+                    sentence = first_buf.strip()
+                    if sentence:
+                        full_content.append(sentence)
+                        self._asr_tts.put_tts_text(
+                            sentence,
+                            asr_end_ts=asr_end_ts,
+                        )
+                        first_tts_ts = asyncio.get_event_loop().time()
+                        first_chunk_sent = True
+                        first_buf = ""
+                # 在首片段发送前，不进入按句切分逻辑，继续累积
+                if not first_chunk_sent:
+                    continue
+
             buffer += delta
             # 按句号、问号、感叹号、换行切分，有完整句就送 TTS
             parts = _SENTENCE_SPLIT.split(buffer)
@@ -98,7 +122,16 @@ class G1Chat:
                     buffer = ""
                     continue
                 buffer = part
-        tail = buffer.strip()
+
+        # 处理流结束时剩余的内容：
+        # - 如果首片段尚未发送，则把首片段和 buffer 合并后一并发送；
+        # - 否则只处理 buffer 中剩余的尾巴。
+        if not first_chunk_sent:
+            tail_source = first_buf + buffer
+        else:
+            tail_source = buffer
+
+        tail = tail_source.strip()
         if tail:
             full_content.append(tail)
             self._asr_tts.put_tts_text(
