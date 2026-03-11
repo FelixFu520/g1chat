@@ -10,6 +10,7 @@ import subprocess
 from typing import Optional, List, Dict, Any, Tuple, AsyncGenerator
 
 from g1chat.utils.logging import default_logger as logger
+from g1chat.utils.env import G1CHAT_ASR_APP_KEY, G1CHAT_ASR_ACCESS_KEY
 
 
 DEFAULT_SAMPLE_RATE = 16000
@@ -40,8 +41,8 @@ class CompressionType:
 class Config:
     def __init__(self):
         # 填入控制台获取的app id和access token
-        app_id = os.environ.get("ASR_APP_KEY")
-        access_key = os.environ.get("ASR_ACCESS_KEY")
+        app_id = G1CHAT_ASR_APP_KEY
+        access_key = G1CHAT_ASR_ACCESS_KEY
         assert app_id and access_key, "ASR_APP_KEY and ASR_ACCESS_KEY must be set"
         self.auth = {
             "app_key": app_id,

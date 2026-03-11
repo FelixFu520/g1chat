@@ -30,6 +30,7 @@ from g1chat.audio.volcengine_doubao_tts import (
 )
 from g1chat.audio.audio_device import AudioDevice
 from g1chat.utils.logging import default_logger as logger
+from g1chat.utils.env import G1CHAT_TTS_APP_KEY, G1CHAT_TTS_ACCESS_KEY
 
 
 def convert_mp3_to_pcm(mp3_data: bytes, target_sample_rate: int = 16000) -> bytes:
@@ -120,8 +121,8 @@ async def main():
 
     # 构建 WebSocket 连接请求头
     headers = {
-        "X-Api-App-Key": os.getenv("TTS_APP_KEY"),
-        "X-Api-Access-Key": os.getenv("TTS_ACCESS_KEY"),
+        "X-Api-App-Key": G1CHAT_TTS_APP_KEY,
+        "X-Api-Access-Key": G1CHAT_TTS_ACCESS_KEY,
         "X-Api-Resource-Id": ("seed-tts-2.0"),
         "X-Api-Connect-Id": str(uuid.uuid4()),  # 生成唯一的连接 ID
     }

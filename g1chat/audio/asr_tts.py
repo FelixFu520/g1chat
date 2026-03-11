@@ -23,6 +23,7 @@ from pydub import AudioSegment
 import websockets
 from typing import Optional
 from g1chat.utils.logging import default_logger as logger
+from g1chat.utils.env import G1CHAT_ASR_APP_KEY, G1CHAT_ASR_ACCESS_KEY, G1CHAT_TTS_APP_KEY, G1CHAT_TTS_ACCESS_KEY
 from g1chat.audio.audio_device import AudioDevice
 from g1chat.audio.volcengine_doubao_asr import AsrWsClient
 from g1chat.audio.volcengine_doubao_tts import (
@@ -71,8 +72,8 @@ class ASRTTS:
         self.tts_queue = Queue()  # TTS文本队列，存储待转换为语音的文本
         self.tts_queue_event = None  # 异步事件，用于通知有新文本放入队列（在异步上下文中创建）
         self.tts_chat_id = 1  # TTS chat_id 计数器，用于标识不同的TTS会话
-        self.tts_appid = os.getenv("TTS_APP_KEY")  # TTS应用ID（从环境变量获取）
-        self.tts_access_token = os.getenv("TTS_ACCESS_KEY")  # TTS访问令牌（从环境变量获取）
+        self.tts_appid = G1CHAT_TTS_APP_KEY  # TTS应用ID（从环境变量获取）
+        self.tts_access_token = G1CHAT_TTS_ACCESS_KEY  # TTS访问令牌（从环境变量获取）
         self.tts_resource_id = "seed-tts-2.0"  # TTS资源ID，指定使用的TTS模型
         self.tts_voice_type = "zh_male_m191_uranus_bigtts"  # TTS语音类型（中文男声）
         # 使用 PCM 直接播放，避免 MP3 解码延迟

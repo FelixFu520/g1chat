@@ -7,6 +7,11 @@ G1Chat: 语音对话流水线
 import asyncio
 import re
 import os
+import json
+from datetime import datetime
+import traceback
+from token import OP
+from queue import Queue
 from typing import Optional
 from typing import Optional
 from openai import AsyncOpenAI
@@ -14,8 +19,9 @@ from openai import AsyncOpenAI
 from g1chat.audio.asr_tts import ASRTTS
 from g1chat.utils.logging import default_logger as logger
 from g1chat.utils.env import (
-    DEFAULT_SYSTEM_PROMPT, DEFAULT_MODEL, ARK_API_KEY, ARK_BASE_URL,
-    SILENCE_TIMEOUT_MS
+    G1CHAT_DEFAULT_SYSTEM_PROMPT, G1CHAT_DEFAULT_MODEL, G1CHAT_ARK_API_KEY, G1CHAT_ARK_BASE_URL,
+    G1CHAT_SILENCE_TIMEOUT_MS, G1CHAT_HOOKS, G1CHAT_LANGUAGE, G1CHAT_WAKE_UP_TEXT, G1CHAT_SLEEP_TEXT,
+    G1CHAT_WORK_DIR
 )
 
 # 用于流式回复按句切分
@@ -39,18 +45,17 @@ class G1Chat:
         self._asr_tts = ASRTTS()
 
         # 初始化 LLM 客户端
-        self._client = AsyncOpenAI(api_key=ARK_API_KEY, base_url=ARK_BASE_URL)
+        self._client = AsyncOpenAI(api_key=G1CHAT_ARK_API_KEY, base_url=G1CHAT_ARK_BASE_URL)
 
         # 多轮对话历史
-        self._messages: list[dict[str, str]] = [
-            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-        ]
+        self._messages: Optional[list[dict[str, str]]] = None
 
-
-        self._running = False
-        self._asr_task: Optional[asyncio.Task] = None
-        self._tts_task: Optional[asyncio.Task] = None
-        self._pipeline_task: Optional[asyncio.Task] = None
+        self.wakeup = False # 是否唤醒
+        self._running = False # 是否运行
+        self.text_queue = Queue() # 文本队列, 用于传输信号, 例如停止信号, 挥手信号
+        self._asr_task: Optional[asyncio.Task] = None # ASR 任务
+        self._tts_task: Optional[asyncio.Task] = None # TTS 任务
+        self._pipeline_task: Optional[asyncio.Task] = None # 流水线任务
 
     async def _call_llm(self, user_text: str, asr_end_ts: Optional[float] = None) -> str:
         """
@@ -74,7 +79,7 @@ class G1Chat:
 
         stream = await self._client.chat.completions.create(
             messages=self._messages,
-            model=DEFAULT_MODEL,
+            model=G1CHAT_DEFAULT_MODEL,
             stream=True,
             extra_body={"thinking": {"type": "disabled"}},
         )
@@ -172,10 +177,8 @@ class G1Chat:
                 asr_tts.asr_queue_event.clear()
 
                 while not asr_tts.asr_queue.empty():
-                    try:
-                        result = asr_tts.asr_queue.get_nowait()
-                    except Exception:
-                        break
+                    # ============== ASR ==============
+                    result = asr_tts.asr_queue.get_nowait()
                     if not result or not isinstance(result, dict):
                         continue
                     text = result.get("text", "").strip()
@@ -191,6 +194,81 @@ class G1Chat:
                     else:
                         logger.info(f"User: {result}")
 
+                    # ============== WAKE_UP & SLEEP Hook ==============
+                    if "wake_sleep_hooks" not in G1CHAT_HOOKS or len(G1CHAT_HOOKS["wake_sleep_hooks"]) == 0:
+                        if G1CHAT_LANGUAGE == "zh":
+                            response_text = "请正确配置唤醒和睡眠的钩子"
+                        else:
+                            response_text = "Please configure the wake_sleep_hooks correctly"
+                        self._asr_tts.put_tts_text(response_text)
+                        continue
+                        
+                    if not self.wakeup and G1CHAT_WAKE_UP_TEXT in text:
+                        self.wakeup = True
+
+                        if G1CHAT_LANGUAGE == "zh":
+                            response_text = G1CHAT_HOOKS["wake_sleep_hooks"][0]["response_zh"]
+                        elif G1CHAT_LANGUAGE == "en":
+                            response_text = G1CHAT_HOOKS["wake_sleep_hooks"][0]["response_en"]
+                        self._asr_tts.put_tts_text(response_text)
+
+                        self.text_queue.put(G1CHAT_HOOKS["wake_sleep_hooks"][0]["signal"])
+
+                        # 更新对话历史
+                        self._messages = [{"role": "system", "content": G1CHAT_DEFAULT_SYSTEM_PROMPT,}]
+                        self._messages.append({"role": "user", "content": text})
+                        self._messages.append({"role": "assistant", "content": response_text})
+
+                        continue
+                    
+                    if self.wakeup and G1CHAT_SLEEP_TEXT in text:
+                        self.wakeup = False
+
+                        if G1CHAT_LANGUAGE == "zh":
+                            response_text = G1CHAT_HOOKS["wake_sleep_hooks"][1]["response_zh"]
+                        elif G1CHAT_LANGUAGE == "en":
+                            response_text = G1CHAT_HOOKS["wake_sleep_hooks"][1]["response_en"]
+                        self._asr_tts.put_tts_text(response_text)
+                        
+                        self.text_queue.put(G1CHAT_HOOKS["wake_sleep_hooks"][1]["signal"])
+
+                        # 保存历史对话
+                        save_history_dialog_path = os.path.join(G1CHAT_WORK_DIR, "dialogs", f"{datetime.now().strftime('%Y%m%d%H%M%S')}.json")
+                        os.makedirs(os.path.dirname(save_history_dialog_path), exist_ok=True)
+                        with open(save_history_dialog_path, "w") as f:
+                            json.dump(self._messages, f)
+
+                        # 清空对话历史
+                        self._messages = []
+
+                        continue
+
+                    if not self.wakeup:
+                        continue
+
+                    # ============== ASR Hook ==============
+                    if "asr_hooks" not in G1CHAT_HOOKS:
+                        if G1CHAT_LANGUAGE == "zh":
+                            response_text = "请正确配置语音识别的钩子"
+                        else:
+                            response_text = "Please configure the asr_hooks correctly"
+                        self._asr_tts.put_tts_text(response_text)
+                        continue
+
+                    for hook in G1CHAT_HOOKS["asr_hooks"]:
+                        if hook['name'] == text.strip().lower():
+                            if G1CHAT_LANGUAGE == "zh":
+                                response_text = hook['response_zh']
+                            else:
+                                response_text = hook['response_en']
+                            self._asr_tts.put_tts_text(response_text)
+
+                            self.text_queue.put(hook["signal"])
+                        
+                            break
+                        
+
+
                     try:
                         llm_start = asyncio.get_event_loop().time()
                         reply = await self._call_llm(text, asr_end_ts=end_ts)
@@ -202,13 +280,13 @@ class G1Chat:
                             f"LLM 流式完成耗时: {llm_cost_ms:.1f} ms"
                         )
                     except Exception as e:
-                        logger.error(f"LLM 调用失败: {e}")
+                        logger.error(f"LLM 调用失败: {traceback.format_exc()}")
                         asr_tts.put_tts_text("抱歉，我这边出错了，请再说一次。")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"流水线异常: {e}")
+                logger.debug(f"流水线异常: {traceback.format_exc()}")
                 await asyncio.sleep(0.1)
 
     async def start(self):
@@ -216,7 +294,7 @@ class G1Chat:
         启动语音对话：同时运行 ASR、TTS 处理器和 ASR->LLM->TTS 流水线。
         """
         self._running = True
-        self._asr_task = asyncio.create_task(self._asr_tts.start_realtime_asr(silence_timeout_ms=SILENCE_TIMEOUT_MS))
+        self._asr_task = asyncio.create_task(self._asr_tts.start_realtime_asr(silence_timeout_ms=G1CHAT_SILENCE_TIMEOUT_MS))
         self._tts_task = asyncio.create_task(self._asr_tts.start_tts_processor())
         self._pipeline_task = asyncio.create_task(self._pipeline_loop())
         logger.info("已启动：语音输入 -> ASR -> LLM -> TTS -> 播放")

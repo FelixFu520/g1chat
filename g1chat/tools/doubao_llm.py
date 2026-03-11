@@ -1,9 +1,10 @@
 from openai import OpenAI
-import os
+
+from g1chat.utils.env import G1CHAT_ARK_API_KEY, G1CHAT_ARK_BASE_URL
 
 client = OpenAI(
-    api_key=os.environ.get("ARK_API_KEY"),
-    base_url="https://ark.cn-beijing.volces.com/api/v3",
+    api_key=G1CHAT_ARK_API_KEY,
+    base_url=G1CHAT_ARK_BASE_URL,
 )
 
 
