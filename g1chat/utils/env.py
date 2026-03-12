@@ -44,7 +44,7 @@ G1CHAT_ARK_API_KEY = os.getenv("G1CHAT_ARK_API_KEY") if os.getenv("G1CHAT_ARK_AP
 G1CHAT_ARK_BASE_URL = os.getenv("G1CHAT_ARK_BASE_URL") if os.getenv("G1CHAT_ARK_BASE_URL") else "https://ark.cn-beijing.volces.com/api/v3"
 
 # ASR & TTS（静默超时：判定“一句话结束”的等待时间，默认 400ms，可通过 SILENCE_TIMEOUT_MS 覆盖）
-G1CHAT_SILENCE_TIMEOUT_MS = os.getenv("G1CHAT_SILENCE_TIMEOUT_MS") if os.getenv("G1CHAT_SILENCE_TIMEOUT_MS") else 400
+G1CHAT_SILENCE_TIMEOUT_MS = int(os.getenv("G1CHAT_SILENCE_TIMEOUT_MS")) if os.getenv("G1CHAT_SILENCE_TIMEOUT_MS") else 400
 G1CHAT_ASR_APP_KEY = os.getenv("G1CHAT_ASR_APP_KEY") if os.getenv("G1CHAT_ASR_APP_KEY") else ""
 G1CHAT_ASR_ACCESS_KEY = os.getenv("G1CHAT_ASR_ACCESS_KEY") if os.getenv("G1CHAT_ASR_ACCESS_KEY") else ""
 G1CHAT_TTS_APP_KEY = os.getenv("G1CHAT_TTS_APP_KEY") if os.getenv("G1CHAT_TTS_APP_KEY") else ""
