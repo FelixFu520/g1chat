@@ -3,6 +3,7 @@ import numpy as np
 import threading
 import time
 import sys
+import argparse
 from collections import deque
 
 from g1chat.utils.logging import default_logger as logger
@@ -416,6 +417,11 @@ class RealtimeAudioLoopback:
 
 def main():
     """主函数"""
+    parser = argparse.ArgumentParser(description="实时音频回环程序")
+    parser.add_argument("--device_mic", type=str, default="USB", help="录音设备名称关键字")
+    parser.add_argument("--device_speaker", type=str, default="USB", help="录音设备名称关键字")
+    args = parser.parse_args()
+    
     logger.info("实时音频回环程序")
     logger.info("=" * 50)
     
@@ -428,8 +434,8 @@ def main():
     # - delay_ms: 额外延迟（毫秒）
     
     loopback = RealtimeAudioLoopback(
-        input_device_name="USB",      # 录音设备
-        output_device_name="USB",     # 播放设备
+        input_device_name=args.device_mic,      # 录音设备
+        output_device_name=args.device_speaker,     # 播放设备
         buffer_size=512,              # 较小的缓冲区减少延迟
         auto_gain=True,               # 启用自动增益控制
         delay_ms=50,                  # 50ms额外延迟
