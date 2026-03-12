@@ -455,7 +455,7 @@ class AudioDevice:
         self.output_device_info = self.p.get_device_info_by_index(self.output_device_index)
         self.sample_rate = int(self.input_device_info.get("defaultSampleRate", 16000))
         self.channels = channels if channels else self.input_device_info.get("maxInputChannels", 1)
-        self.chunk_size = chunk_size if chunk_size else self.input_device_info.get("defaultSampleRate", 1024)
+        self.chunk_size = chunk_size if chunk_size else self.input_device_info.get("defaultSampleRate", 512)
         self.format = pyaudio.paInt16
         self._print_device_info()
         

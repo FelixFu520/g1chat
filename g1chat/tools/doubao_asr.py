@@ -237,7 +237,6 @@ async def test_realtime_asr(url: str, seg_duration: int, duration: int):
     # 创建音频设备，配置录音参数
     audio_device = AudioDevice(
         channels=1,         # 单声道
-        chunk_size=1024,    # 每次读取1024个样本
         enable_aec=False    # 实时ASR测试时可以关闭回声消除
     )
     
