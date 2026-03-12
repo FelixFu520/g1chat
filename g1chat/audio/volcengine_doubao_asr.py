@@ -185,7 +185,7 @@ class RequestBuilder:
         }
 
     @staticmethod
-    def new_full_client_request(seq: int) -> bytes:  # 添加seq参数
+    def new_full_client_request(seq: int, sample_rate: int = DEFAULT_SAMPLE_RATE) -> bytes:
         header = AsrRequestHeader.default_header() \
             .with_message_type_specific_flags(MessageTypeSpecificFlags.POS_SEQUENCE)
         
@@ -196,7 +196,7 @@ class RequestBuilder:
             "audio": {
                 "format": "wav",
                 "codec": "raw",
-                "rate": 16000,
+                "rate": sample_rate,
                 "bits": 16,
                 "channel": 1
             },
@@ -318,10 +318,11 @@ class ResponseParser:
         return response
 
 class AsrWsClient:
-    def __init__(self, url: str, segment_duration: int = 200):
+    def __init__(self, url: str, segment_duration: int = 200, sample_rate: int = DEFAULT_SAMPLE_RATE):
         self.seq = 1
         self.url = url
         self.segment_duration = segment_duration
+        self.sample_rate = sample_rate
         self.conn = None
         self.session = None  # 添加session引用
 
@@ -372,7 +373,8 @@ class AsrWsClient:
             raise
             
     async def send_full_client_request(self) -> None:
-        request = RequestBuilder.new_full_client_request(self.seq)
+        logger.info(f"ASR full_client_request: sample_rate={self.sample_rate}")
+        request = RequestBuilder.new_full_client_request(self.seq, sample_rate=self.sample_rate)
         self.seq += 1  # 发送后递增
         try:
             await self.conn.send_bytes(request)
@@ -537,24 +539,18 @@ class AsrWsClient:
         """
         async def sender():
             try:
-                is_first = True
                 async for audio_chunk in audio_stream:
                     if audio_chunk is None:
-                        # None表示结束信号
                         break
                     
-                    # 发送音频数据
-                    is_last = False  # 实时流中间的数据包
                     request = RequestBuilder.new_audio_only_request(
                         self.seq,
                         audio_chunk,
-                        is_last=is_last
+                        is_last=False
                     )
                     await self.conn.send_bytes(request)
-                    # logger.info(f"Sent realtime audio chunk with seq: {self.seq}")
                     self.seq += 1
                 
-                # 发送最后一个空包表示结束
                 request = RequestBuilder.new_audio_only_request(
                     self.seq,
                     b'',
@@ -567,12 +563,23 @@ class AsrWsClient:
                 logger.error(f"Error sending realtime audio: {e}")
                 raise
         
-        # 启动发送和接收任务
         sender_task = asyncio.create_task(sender())
         
         try:
-            async for response in self.recv_messages():
-                yield response
+            # 实时流模式：不因 is_last_package 退出，持续接收直到连接关闭或 sender 结束
+            async for msg in self.conn:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    response = ResponseParser.parse_response(msg.data)
+                    yield response
+                    if response.code != 0:
+                        logger.warning(f"ASR realtime stream got error code: {response.code}, payload: {response.payload_msg}")
+                        break
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.error(f"WebSocket error: {msg.data}")
+                    break
+                elif msg.type == aiohttp.WSMsgType.CLOSED:
+                    logger.info("WebSocket connection closed")
+                    break
         finally:
             sender_task.cancel()
             try:
