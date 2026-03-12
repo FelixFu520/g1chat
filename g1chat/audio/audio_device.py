@@ -430,6 +430,10 @@ class AudioDevice:
             chunk_size: 音频块大小,None表示使用输入设备的默认采样率
             enable_aec: 是否启用回声消除
         """
+        self._pa_running = self._is_pulseaudio_running()    # 检测 PulseAudio 守护进程是否正在运行
+        if self._pa_running:
+            self._ensure_pulseaudio_input_profile()  # 确保 PulseAudio 中 USB 声卡同时启用了输入和输出 profile
+
         self.p = pyaudio.PyAudio()
         
         # 分别获取输入和输出设备（优先按环境变量中的设备名模糊匹配）
@@ -484,22 +488,135 @@ class AudioDevice:
         # 控制标志
         self.is_running = False
     
-    def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
-        """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）"""
+    @staticmethod
+    def _is_pulseaudio_running() -> bool:
+        """检测 PulseAudio 守护进程是否正在运行"""
+        import subprocess
         try:
+            return subprocess.run(
+                ["pulseaudio", "--check"], capture_output=True
+            ).returncode == 0
+        except FileNotFoundError:
+            return False
+
+    @staticmethod
+    def _ensure_pulseaudio_input_profile():
+        """确保 PulseAudio 中 USB 声卡同时启用了输入和输出 profile。
+
+        部分 USB 声卡默认只激活 output profile, 导致麦克风无法通过PulseAudio 访问。
+        这里自动检测并切换到 output+input 组合 profile。
+        仅在检测到 PulseAudio 运行时由 __init__ 调用。
+        """
+        import subprocess
+        import time
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "cards"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return
+
+            current_card = None
+            active_profile = None
+            target_profile = None
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Name: alsa_card.usb"):
+                    current_card = stripped.split("Name: ", 1)[1]
+                    active_profile = None
+                    target_profile = None
+                elif current_card and stripped.startswith("Active Profile:"):
+                    active_profile = stripped.split("Active Profile: ", 1)[1].strip()
+                elif current_card and "+input:" in stripped and stripped.startswith("output:"):
+                    candidate = stripped.split(" ")[0]
+                    if candidate.startswith("output:") and "+input:" in candidate:
+                        if target_profile is None:
+                            target_profile = candidate
+
+                if current_card and active_profile is not None:
+                    if "+input:" not in active_profile and target_profile:
+                        default_logger.info(
+                            f"PulseAudio USB 声卡 profile 切换: {active_profile} -> {target_profile}"
+                        )
+                        subprocess.run(
+                            ["pactl", "set-card-profile", current_card, "off"],
+                            capture_output=True, timeout=5
+                        )
+                        time.sleep(0.3)
+                        subprocess.run(
+                            ["pactl", "set-card-profile", current_card, target_profile],
+                            capture_output=True, timeout=5
+                        )
+                        time.sleep(0.5)
+                    current_card = None
+                    active_profile = None
+                    target_profile = None
+        except Exception as e:
+            default_logger.warning(f"自动配置 PulseAudio USB 声卡 profile 失败: {e}")
+
+    def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
+        """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）
+
+        查找策略（优先级从高到低）：
+        1. 按关键字匹配非 hw: 设备（如 PulseAudio 虚拟设备）
+        2. 按关键字匹配 hw: 硬件设备（仅在 PulseAudio 未运行时使用）
+        3. 如果 PulseAudio 运行但关键字未匹配到任何设备, fallback 到 ``pulse`` 虚拟设备
+
+        在 PulseAudio 运行的环境中（如开发板），直接使用 hw: 设备会与
+        PulseAudio 产生独占锁冲突，导致播放/录音静默失效，因此跳过 hw: 设备。
+        """
+        try:
+            direction = '输入' if is_input else '输出'
             count = self.p.get_device_count()
+            hw_candidate = None
+
             for i in range(count):
                 info = self.p.get_device_info_by_index(i)
-                # 只在对应方向上有效的设备里查
                 if is_input and info.get("maxInputChannels", 0) <= 0:
                     continue
                 if (not is_input) and info.get("maxOutputChannels", 0) <= 0:
                     continue
-                if name_keyword.lower() in str(info.get("name", "")).lower():
+                device_name = str(info.get("name", ""))
+                if name_keyword.lower() not in device_name.lower():
+                    continue
+                # 匹配到了，区分 hw 设备和非 hw 设备
+                if "(hw:" in device_name:
+                    if hw_candidate is None:
+                        hw_candidate = (i, device_name)
+                else:
                     default_logger.info(
-                        f"根据关键字 '{name_keyword}' 匹配到 {'输入' if is_input else '输出'} 设备: {info['name']} (index={i})"
+                        f"根据关键字 '{name_keyword}' 匹配到 {direction} 设备: {device_name} (index={i})"
                     )
                     return i
+
+            # hw 设备仅在 PulseAudio 未运行时使用，避免独占锁冲突
+            if hw_candidate is not None and not self._pa_running:
+                default_logger.info(
+                    f"根据关键字 '{name_keyword}' 匹配到 {direction} 设备: "
+                    f"{hw_candidate[1]} (index={hw_candidate[0]})"
+                )
+                return hw_candidate[0]
+
+            # PulseAudio 运行但关键字未匹配到可用设备，fallback 到 pulse 虚拟设备
+            if self._pa_running:
+                for i in range(count):
+                    info = self.p.get_device_info_by_index(i)
+                    if is_input and info.get("maxInputChannels", 0) <= 0:
+                        continue
+                    if (not is_input) and info.get("maxOutputChannels", 0) <= 0:
+                        continue
+                    if info.get("name", "").lower() == "pulse":
+                        if hw_candidate:
+                            default_logger.info(
+                                f"PulseAudio 运行中，跳过 hw 设备 {hw_candidate[1]}，"
+                                f"{direction}设备使用 pulse (index={i})"
+                            )
+                        else:
+                            default_logger.info(
+                                f"关键字 '{name_keyword}' 未匹配到{direction}设备，"
+                                f"fallback 到 pulse (index={i})"
+                            )
+                        return i
         except Exception as e:
             default_logger.warning(f"根据关键字查找音频设备失败: {e}")
         return None
@@ -545,9 +662,6 @@ class AudioDevice:
     
     def _output_callback(self, in_data, frame_count, time_info, status):
         """播放回调函数 - 优化版本,避免队列重建"""
-        # if status:
-            # default_logger.info(f"输出状态: {status}")
-        
         required_bytes = frame_count * self.channels * 2  # 2 bytes per sample (int16)
         
         # 尝试从缓冲区和队列填充数据
