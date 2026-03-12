@@ -23,6 +23,7 @@ from pydub import AudioSegment
 import websockets
 from typing import Optional
 from g1chat.utils.logging import default_logger as logger
+from g1chat.utils.websockets_compat import ws_connect, is_ws_connection_closed
 from g1chat.utils.env import G1CHAT_ASR_APP_KEY, G1CHAT_ASR_ACCESS_KEY, G1CHAT_TTS_APP_KEY, G1CHAT_TTS_ACCESS_KEY
 from g1chat.audio.audio_device import AudioDevice
 from g1chat.audio.volcengine_doubao_asr import AsrWsClient
@@ -782,10 +783,10 @@ class ASRTTS:
         }
 
         # ========== 连接到 WebSocket 服务器 ==========
-        # 参考 g1chat.tools.doubao_tts 中的实现，使用 websockets 10+ 的 extra_headers 参数
-        websocket = await websockets.connect(
+        # 兼容 websockets 13.x (extra_headers) 与 14+/16+ (additional_headers)
+        websocket = await ws_connect(
             self.tts_endpoint,
-            extra_headers=headers,  # websockets 10+ 使用 extra_headers 传递请求头
+            headers,
             max_size=10 * 1024 * 1024,  # 最大消息大小10MB（用于接收音频数据）
             ping_interval=30,  # 每30秒发送一次ping保持连接活跃
             ping_timeout=20,   # ping超时时间20秒
@@ -846,7 +847,7 @@ class ASRTTS:
             while self.tts_running:
                 try:
                     # ========== 建立或重新建立 WebSocket 连接 ==========
-                    if websocket is None or websocket.closed:
+                    if websocket is None or is_ws_connection_closed(websocket):
                         logger.info("TTS: 正在建立 WebSocket 连接...")
                         websocket = await self._create_websocket_connection()
                         logger.info("TTS: WebSocket 连接已建立")

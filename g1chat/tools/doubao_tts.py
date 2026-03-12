@@ -17,6 +17,7 @@ import asyncio
 import io
 from pydub import AudioSegment
 
+from g1chat.utils.websockets_compat import ws_connect
 from g1chat.audio.volcengine_doubao_tts import (
     EventType,
     MsgType,
@@ -127,11 +128,10 @@ async def main():
         "X-Api-Connect-Id": str(uuid.uuid4()),  # 生成唯一的连接 ID
     }
 
-    # 连接到 WebSocket 服务器
+    # 连接到 WebSocket 服务器（兼容 websockets 13.x 与 14+/16+）
     logger.info(f"Connecting to {args.endpoint} with headers: {headers}")
-    # websockets 10+ 使用 extra_headers 参数而不是 additional_headers
-    websocket = await websockets.connect(
-        args.endpoint, extra_headers=headers, max_size=10 * 1024 * 1024
+    websocket = await ws_connect(
+        args.endpoint, headers, max_size=10 * 1024 * 1024
     )
     # 部分 websockets 版本不暴露 response 属性，这里做兼容处理
     logid = None
