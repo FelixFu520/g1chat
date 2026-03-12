@@ -1,0 +1,104 @@
+{
+    "wake_sleep_hooks": [
+        
+        {
+            "name": "wake_up",
+            "order": 1,
+            "response_zh": "我在我在, 我是地瓜君",
+            "response_en": "I'm here, I'm G1Chat",
+            "signal": "signal:wave_hands"
+        },
+        {
+            "name": "sleep",
+            "order": 2,
+            "response_zh": "再见,我要去休息了",
+            "response_en": "Goodbye, have a nice day!",
+            "signal": "signal:wave_hands"
+        }
+    ],
+    "asr_hooks": [
+        {
+            "name": ["停止"],
+            "relate": "and",
+            "order": 1,
+            "response_zh": "好的, 我要停止了",
+            "response_en": "OK, I'm stopping",
+            "signal": "signal:stop"
+        },
+        {
+            "name": ["进电梯"],
+            "relate": "and",
+            "order": 2,
+            "response_zh": "好的, 我要进电梯了",
+            "response_en": "OK, I'm going to the elevator",
+            "signal": "signal:enter_elevator"
+        },
+        {
+            "name": ["出电梯"],
+            "relate": "and",
+            "order": 3,
+            "response_zh": "好的, 我要出电梯了",
+            "response_en": "OK, I'm leaving the elevator",
+            "signal": "signal:leave_elevator"
+        },
+        {
+            "name": ["切换8楼地图","切换八楼地图"],
+            "relate": "or",
+            "order": 4,
+            "response_zh": "好的, 我要切换8楼地图了",
+            "response_en": "OK, I'm switching to the 8th floor map",
+            "signal": "signal:switch_8th_floor_map"
+        },
+        {
+            "name": ["切换4楼地图", "切换四楼地图"],
+            "relate": "or",
+            "order": 6,
+            "response_zh": "好的, 我要切换4楼地图了",
+            "response_en": "OK, I'm switching to the 4th floor map",
+            "signal": "signal:switch_4th_floor_map"
+        },
+        {
+            "name": ["继续寻找目标点"],
+            "relate": "and",
+            "order": 7,
+            "response_zh": "好的, 我要继续寻找目标点了",
+            "response_en": "OK, I'm continuing to find the target point",
+            "signal": "signal:continue_find_target_point"
+        },
+        {
+            "name": ["introduce", "horizon"],
+            "relate": "and",
+            "order": 8,
+            "response_zh": "好的, 我要介绍地平线了",
+            "response_en": "Horizon Robotics was founded in 2015 and is headquartered in Beijing.",
+            "signal": "signal:introduce_horizon"
+        },
+        {
+            "name": ["watch", "demo"],
+            "relate": "and",
+            "order": 9,
+            "response_zh": "好的, 我要带你去机器人实验室了",
+            "response_en": "No problem, please follow me.",
+            "signal": "signal:watch_demo"
+        }
+    ],
+    "location_hooks": [
+        {
+            "name": ["机器人实验室"],
+            "relate": "and",
+            "order": 1,
+            "response_zh": "好的, 我要带你去机器人实验室了",
+            "response_en": "No problem, please follow me.",
+            "signal": "signal:go_to_robot_lab"
+        }
+    ],
+    "control_hooks": {
+        "one_point_1_waypoint_1":{
+            "response_zh": "好的, 我已经到导航点了",
+            "response_en": "I'm at the navigation point."
+        }
+    },
+    "control_signals": [
+        "one_point_1_waypoint_1"
+    ]
+}
