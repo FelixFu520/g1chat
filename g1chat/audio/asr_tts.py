@@ -253,7 +253,8 @@ class ASRTTS:
 
             try:
                 # ========== 创建ASR客户端并进行实时识别 ==========
-                async with AsrWsClient(self.asr_url, self.asr_seg_duration) as asr_client:
+                # 使用音频设备的采样率，避免重采样
+                async with AsrWsClient(self.asr_url, self.asr_seg_duration, sample_rate=self.audio_device.sample_rate) as asr_client:
                     # ========== 跟踪识别状态 ==========
                     last_text_time = None  # 最后一次收到识别文本的时间戳
                     accumulated_text = ""  # 累积的识别文本, ASR服务会返回完整的累积文本
@@ -323,6 +324,7 @@ class ASRTTS:
                                     last_is_definite = is_definite  # 更新确定状态
                                     
                                     # logger.debug(f"收到识别文本: {text}, is_definite: {is_definite}")
+                        # logger.info("ASR execute_stream 正常结束")
                     except Exception as e:
                         logger.error(f"实时ASR处理失败: {e}")
                         # 可能是网络问题, 不需要抛出异常，外层循环会处理重连
@@ -349,9 +351,15 @@ class ASRTTS:
                             self.asr_queue_event.set()
                             # logger.info(f"识别结束，将剩余结果放入队列: {accumulated_text}, chat_id: {self.chat_id}")
 
-                # ========== 正常结束（duration_seconds 限制到时）==========
-                # execute_stream 正常退出说明音频流已结束，无需重连
-                break
+                # execute_stream 正常退出：
+                # - 如果设定了 duration_seconds，说明录音时长到了，结束
+                # - 否则是连接被服务端关闭，应重连继续识别
+                if duration_seconds is not None:
+                    break
+                reconnect_attempts += 1
+                logger.info(f"ASR 连接被服务端关闭(第{reconnect_attempts}次重连)，{reconnect_delay:.1f}秒后重连...")
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
             except Exception as e:
                 reconnect_attempts += 1
