@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "g1chat"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -25,6 +25,9 @@ g1chat-audio-device-list = "g1chat.tools.audio_device_list:main"
 
 [tool.setuptools]
 packages = { find = { where = ["."], include = ["g1chat", "g1chat.*"] } }
+
+[tool.setuptools.dynamic]
+version = { attr = "g1chat.__version__" }
 
 [tool.setuptools.package-data]
 g1chat = ["../assets/**/*"]
