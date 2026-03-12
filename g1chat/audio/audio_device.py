@@ -503,11 +503,9 @@ class AudioDevice:
     def _ensure_pulseaudio_usb_audio():
         """确保 PulseAudio 下 USB 声卡的输入和输出都可用，并设为默认设备。
 
-        处理两种情况:
-        1. USB 声卡有 output+input 组合 profile → 切换到该 profile
-        2. USB 声卡只有纯 output profile（常见于 Jetson 等嵌入式平台）→
-           手动为 USB 声卡加载 ALSA source 模块，使麦克风暴露给 PulseAudio
-        最后将 USB 的 sink/source 设为 PulseAudio 默认设备。
+        Jetson 等嵌入式平台上 PulseAudio 对 USB 声卡的 profile 检测不稳定，
+        热插拔后可能只检测到 output profile、只检测到 input profile、或两者都没有。
+        此方法按需手动加载缺失的 sink/source 模块并设为默认设备。
         仅在检测到 PulseAudio 运行时由 __init__ 调用。
         """
         import subprocess
@@ -584,14 +582,37 @@ class AudioDevice:
                         f"加载 USB 麦克风 source 失败: {load_result.stderr.strip()}"
                     )
 
-            # --- 3. 将 USB sink/source 设为默认设备 ---
+            # --- 3. 检查是否已存在 USB 的 sink（扬声器）---
             sinks = _run(["pactl", "list", "sinks", "short"])
+            usb_sink = None
             for line in sinks.stdout.splitlines():
                 parts = line.split("\t")
                 if len(parts) >= 2 and "usb" in parts[1].lower():
-                    _run(["pactl", "set-default-sink", parts[1]])
-                    default_logger.info(f"PulseAudio 默认输出已设为: {parts[1]}")
+                    usb_sink = parts[1]
                     break
+
+            if not usb_sink and usb_alsa_card:
+                default_logger.info(
+                    f"PulseAudio 无 USB 输出设备，尝试手动加载 (alsa card={usb_alsa_card})"
+                )
+                load_result = _run([
+                    "pactl", "load-module", "module-alsa-sink",
+                    f"device=hw:{usb_alsa_card},0",
+                    "sink_name=usb_speaker",
+                    "sink_properties=device.description=USB_Speaker",
+                ])
+                if load_result.returncode == 0:
+                    usb_sink = "usb_speaker"
+                    default_logger.info("已手动加载 USB 扬声器 sink: usb_speaker")
+                else:
+                    default_logger.warning(
+                        f"加载 USB 扬声器 sink 失败: {load_result.stderr.strip()}"
+                    )
+
+            # --- 4. 将 USB sink/source 设为默认设备 ---
+            if usb_sink:
+                _run(["pactl", "set-default-sink", usb_sink])
+                default_logger.info(f"PulseAudio 默认输出已设为: {usb_sink}")
 
             if usb_source:
                 _run(["pactl", "set-default-source", usb_source])
