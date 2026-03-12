@@ -419,7 +419,7 @@ class AudioEchoCancellation:
 class AudioDevice:
     """音频设备管理类"""
     
-    def __init__(self, input_device_index=None, output_device_index=None, channels=1, chunk_size=1024, enable_aec=True):
+    def __init__(self, input_device_index=None, output_device_index=None, channels=1, chunk_size=512, enable_aec=True):
         """
         初始化音频设备
         

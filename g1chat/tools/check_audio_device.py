@@ -57,7 +57,7 @@ def record_and_playback(duration: float = 5.0, enable_aec: bool = False, monitor
                     play_f = np.convolve(play_f, kernel, mode="same")
                 if monitor:
                     # 监听音量再降低一点，减少声学反馈
-                    play_f *= 0.05
+                    play_f *= 1
                     play_int16 = np.clip(play_f, -32768, 32767).astype(np.int16)
                     device.put_playback_data(play_int16.tobytes())
 
@@ -126,6 +126,7 @@ def main() -> None:
         record_and_playback(
             duration=args.duration,
             enable_aec=args.enable_aec,
+            monitor=not args.no_monitor,
         )
     except KeyboardInterrupt:
         print("\n用户中断。")
