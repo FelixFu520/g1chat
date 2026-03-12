@@ -539,19 +539,8 @@ class AudioDevice:
         default_logger.info("="*60)
     
     def _input_callback(self, in_data, frame_count, time_info, status):
-        """录音回调函数"""
-        # if status:
-            # default_logger.info(f"输入状态: {status}")
-        
-        # 应用回声消除(如果启用)
-        if self.aec is not None:
-            cleaned_data = self.aec.process_recorded_audio(in_data)
-        else:
-            cleaned_data = in_data
-        
-        # 将处理后的音频放入队列
-        self.recording_queue.put(cleaned_data)
-        
+        """录音回调函数 — 必须尽快返回, AEC 延迟到消费端处理"""
+        self.recording_queue.put(in_data)
         return (None, pyaudio.paContinue)
     
     def _output_callback(self, in_data, frame_count, time_info, status):
@@ -654,6 +643,12 @@ class AudioDevice:
         """
         self.playback_queue.put(audio_data)
     
+    def _apply_aec(self, raw_data):
+        """对原始录音数据应用回声消除（如果启用）"""
+        if self.aec is not None:
+            return self.aec.process_recorded_audio(raw_data)
+        return raw_data
+
     def get_recorded_data(self, block=True, timeout=None):
         """
         从录音队列获取音频数据
@@ -666,7 +661,8 @@ class AudioDevice:
             录音的音频数据(bytes), 如果队列为空且非阻塞则返回None
         """
         try:
-            return self.recording_queue.get(block=block, timeout=timeout)
+            raw = self.recording_queue.get(block=block, timeout=timeout)
+            return self._apply_aec(raw)
         except queue.Empty:
             return None
     
@@ -709,13 +705,12 @@ class AudioDevice:
             录音的音频数据(bytes), 如果超时则返回None
         """
         try:
-            # 使用asyncio的run_in_executor在线程池中执行阻塞操作
             loop = asyncio.get_event_loop()
-            data = await asyncio.wait_for(
+            raw = await asyncio.wait_for(
                 loop.run_in_executor(None, self.recording_queue.get),
                 timeout=timeout
             )
-            return data
+            return self._apply_aec(raw)
         except asyncio.TimeoutError:
             return None
         except Exception as e:
