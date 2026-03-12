@@ -8,20 +8,27 @@ import asyncio
 import re
 import os
 import json
-from datetime import datetime
+import threading
 import traceback
-from token import OP
+from datetime import datetime
 from queue import Queue
 from typing import Optional
-from typing import Optional
-from openai import AsyncOpenAI
+
+from openai import OpenAI
 
 from g1chat.audio.asr_tts import ASRTTS
 from g1chat.utils.logging import default_logger as logger
 from g1chat.utils.env import (
-    G1CHAT_DEFAULT_SYSTEM_PROMPT, G1CHAT_DEFAULT_MODEL, G1CHAT_ARK_API_KEY, G1CHAT_ARK_BASE_URL,
-    G1CHAT_SILENCE_TIMEOUT_MS, G1CHAT_HOOKS, G1CHAT_LANGUAGE, G1CHAT_WAKE_UP_TEXT, G1CHAT_SLEEP_TEXT,
-    G1CHAT_WORK_DIR
+    G1CHAT_DEFAULT_SYSTEM_PROMPT,
+    G1CHAT_DEFAULT_MODEL,
+    G1CHAT_ARK_API_KEY,
+    G1CHAT_ARK_BASE_URL,
+    G1CHAT_SILENCE_TIMEOUT_MS,
+    G1CHAT_HOOKS,
+    G1CHAT_LANGUAGE,
+    G1CHAT_WAKE_UP_TEXT,
+    G1CHAT_SLEEP_TEXT,
+    G1CHAT_WORK_DIR,
 )
 
 # 用于流式回复按句切分
@@ -44,8 +51,8 @@ class G1Chat:
         # 初始化 ASR 和 TTS
         self._asr_tts = ASRTTS()
 
-        # 初始化 LLM 客户端
-        self._client = AsyncOpenAI(api_key=G1CHAT_ARK_API_KEY, base_url=G1CHAT_ARK_BASE_URL)
+        # 使用同步 OpenAI 客户端（与 doubao_llm 一致），在独立线程中拉流，首 token 延迟更低
+        self._sync_llm_client = OpenAI(api_key=G1CHAT_ARK_API_KEY, base_url=G1CHAT_ARK_BASE_URL)
 
         # 多轮对话历史
         self._messages: Optional[list[dict[str, str]]] = None
@@ -81,16 +88,31 @@ class G1Chat:
         MIN_FIRST_CHARS = 8         # 首片段最少字符数, 首片段最少字符数，尽量小以换取更快响应
         started_tts_session = False # 标记本次 LLM 回复是否已经为 TTS 启动过一次“中断+新会话”
 
-        stream = await self._client.chat.completions.create(
-            messages=self._messages,
-            model=G1CHAT_DEFAULT_MODEL,
-            stream=True,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        # 同步客户端在独立线程拉流，用 asyncio.Queue + call_soon_threadsafe 递交给事件循环，
+        # 避免 run_in_executor 与 ASR/control 争用默认线程池导致首 chunk 被延迟处理
+        loop = asyncio.get_event_loop()
+        chunk_async_queue: asyncio.Queue = asyncio.Queue()
+
+        def sync_stream():
+            stream = self._sync_llm_client.chat.completions.create(
+                messages=self._messages,
+                model=G1CHAT_DEFAULT_MODEL,
+                stream=True,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            for ch in stream:
+                loop.call_soon_threadsafe(chunk_async_queue.put_nowait, ch)
+            loop.call_soon_threadsafe(chunk_async_queue.put_nowait, None)
+
+        t = threading.Thread(target=sync_stream, daemon=True)
+        t.start()
 
         is_first_response = True    # 是否是LLM流式回复的第一包
         llm_response_type = None    # LLM 回复类型, 用于判断是位置信息还是音频信息
-        async for chunk in stream:
+        while True:
+            chunk = await chunk_async_queue.get()
+            if chunk is None:
+                break
             delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
             if not delta:
                 continue
@@ -375,7 +397,7 @@ class G1Chat:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.debug(f"流水线异常: {traceback.format_exc()}")
+                logger.error(f"流水线异常: {traceback.format_exc()}")
                 await asyncio.sleep(0.1)
 
     async def start(self):
