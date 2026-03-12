@@ -40,6 +40,9 @@ python -m g1chat.tools.play_audio --wav_file assets/xiaozhan_rate_16000.wav --de
 # 使用g1chat.tools.audio_device_list查出的设备录制音频
 python -m g1chat.tools.record_audio --device_index 24
 
+# 实时回环
+python -m g1chat.tools.realtime_audio_loopback --device_mic USB --device_speaker USB
+
 # 实时播放音频
 python -m g1chat.tools.check_audio_device
 
