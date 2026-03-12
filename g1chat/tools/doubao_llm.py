@@ -7,13 +7,17 @@ from g1chat.utils.env import (
     G1CHAT_DEFAULT_MODEL,
     G1CHAT_DEFAULT_SYSTEM_PROMPT,
 )
+from g1chat.utils.logging import default_logger as logger
+
 
 client = OpenAI(
     api_key=G1CHAT_ARK_API_KEY,
     base_url=G1CHAT_ARK_BASE_URL,
 )
 
-print(f"模型: {G1CHAT_DEFAULT_MODEL}")
+logger.info(f"模型: {G1CHAT_DEFAULT_MODEL}")
+
+start_time = time.time()
 response = client.chat.completions.create(
     messages=[
         {"role": "system", "content": G1CHAT_DEFAULT_SYSTEM_PROMPT},
@@ -30,10 +34,6 @@ response = client.chat.completions.create(
     },
 )
 
-# stream=False的时候，打开这个，启用非流式返回
-# print(response.choices[0].message.content)
-
-start_time = time.time()
 first_token_logged = False
 print('*'*100)
 for chunk in response:
