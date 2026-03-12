@@ -59,7 +59,7 @@ class G1Chat:
 
         self.wakeup = False # 是否唤醒
         self._running = False # 是否运行
-        self.text_queue = Queue() # 文本队列, 用于传输信号, 例如停止信号, 挥手信号
+        self.text_queue = Queue() # 文本队列, 用于传输信号, 例如停止信号, 挥手信号, 例如, signal:text, location:text, user:text, assistant:text, 
         self.control_queue = Queue() # 控制队列, 用于传输控制信号, 例如到达某地点后播放一段音频
         self._asr_task: Optional[asyncio.Task] = None # ASR 任务
         self._tts_task: Optional[asyncio.Task] = None # TTS 任务
@@ -240,6 +240,7 @@ class G1Chat:
                         logger.info(f"User: {result} | 从\u201c静默判定完成\u201d到出队耗时: {asr_delay_ms:.1f} ms")
                     else:
                         logger.info(f"User: {result}")
+                    self.text_queue.put(f"user:{text}")
 
                     # ============== WAKE_UP & SLEEP Hook ==============
                     if "wake_sleep_hooks" not in G1CHAT_HOOKS or len(G1CHAT_HOOKS["wake_sleep_hooks"]) == 0:
@@ -259,6 +260,8 @@ class G1Chat:
                             response_text = G1CHAT_HOOKS["wake_sleep_hooks"][0]["response_en"]
                         self._asr_tts.put_tts_text(response_text)
 
+                        self.text_queue.put(f"assistant:{response_text}")
+
                         self.text_queue.put(G1CHAT_HOOKS["wake_sleep_hooks"][0]["signal"])
 
                         # 更新对话历史
@@ -276,7 +279,9 @@ class G1Chat:
                         elif G1CHAT_LANGUAGE == "en":
                             response_text = G1CHAT_HOOKS["wake_sleep_hooks"][1]["response_en"]
                         self._asr_tts.put_tts_text(response_text)
-                        
+
+                        self.text_queue.put(f"assistant:{response_text}")
+
                         self.text_queue.put(G1CHAT_HOOKS["wake_sleep_hooks"][1]["signal"])
 
                         # 保存历史对话
@@ -321,6 +326,8 @@ class G1Chat:
                                 response_text = hook['response_en']
                             self._asr_tts.put_tts_text(response_text)
 
+                            self.text_queue.put(f"assistant:{response_text}")
+
                             self.text_queue.put(hook["signal"])
                             is_asr_hook_found = True
                             break
@@ -339,6 +346,8 @@ class G1Chat:
                             f"LLM 流式完成耗时: {llm_cost_ms:.1f} ms"
                         )
                         
+                        self.text_queue.put(f"assistant:{reply.strip()}")
+
                         # 如果返回的是location信息, 需要提取出来, 发送给queue_text
                         if llm_response_type == "location":
                             try:
