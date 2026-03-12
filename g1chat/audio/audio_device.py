@@ -430,9 +430,9 @@ class AudioDevice:
             chunk_size: 音频块大小,None表示使用输入设备的默认采样率
             enable_aec: 是否启用回声消除
         """
-        self._pa_running = self._is_pulseaudio_running()    # 检测 PulseAudio 守护进程是否正在运行
+        self._pa_running = self._is_pulseaudio_running()
         if self._pa_running:
-            self._ensure_pulseaudio_input_profile()  # 确保 PulseAudio 中 USB 声卡同时启用了输入和输出 profile
+            self._ensure_pulseaudio_usb_audio()
 
         self.p = pyaudio.PyAudio()
         
@@ -500,59 +500,105 @@ class AudioDevice:
             return False
 
     @staticmethod
-    def _ensure_pulseaudio_input_profile():
-        """确保 PulseAudio 中 USB 声卡同时启用了输入和输出 profile。
+    def _ensure_pulseaudio_usb_audio():
+        """确保 PulseAudio 下 USB 声卡的输入和输出都可用，并设为默认设备。
 
-        部分 USB 声卡默认只激活 output profile, 导致麦克风无法通过PulseAudio 访问。
-        这里自动检测并切换到 output+input 组合 profile。
+        处理两种情况:
+        1. USB 声卡有 output+input 组合 profile → 切换到该 profile
+        2. USB 声卡只有纯 output profile（常见于 Jetson 等嵌入式平台）→
+           手动为 USB 声卡加载 ALSA source 模块，使麦克风暴露给 PulseAudio
+        最后将 USB 的 sink/source 设为 PulseAudio 默认设备。
         仅在检测到 PulseAudio 运行时由 __init__ 调用。
         """
         import subprocess
-        import time
+
+        def _run(cmd, **kwargs):
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=5, **kwargs)
+
         try:
-            result = subprocess.run(
-                ["pactl", "list", "cards"], capture_output=True, text=True, timeout=5
-            )
+            # --- 1. 尝试切换到包含 input 的组合 profile ---
+            result = _run(["pactl", "list", "cards"])
             if result.returncode != 0:
                 return
 
-            current_card = None
+            usb_card_name = None
+            usb_alsa_card = None
             active_profile = None
             target_profile = None
             for line in result.stdout.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("Name: alsa_card.usb"):
-                    current_card = stripped.split("Name: ", 1)[1]
+                    usb_card_name = stripped.split("Name: ", 1)[1]
                     active_profile = None
                     target_profile = None
-                elif current_card and stripped.startswith("Active Profile:"):
+                elif usb_card_name and 'alsa.card = "' in stripped:
+                    usb_alsa_card = stripped.split('"')[1]
+                elif usb_card_name and stripped.startswith("Active Profile:"):
                     active_profile = stripped.split("Active Profile: ", 1)[1].strip()
-                elif current_card and "+input:" in stripped and stripped.startswith("output:"):
+                elif usb_card_name and "+input:" in stripped and stripped.startswith("output:"):
                     candidate = stripped.split(" ")[0]
                     if candidate.startswith("output:") and "+input:" in candidate:
                         if target_profile is None:
                             target_profile = candidate
 
-                if current_card and active_profile is not None:
+                if usb_card_name and active_profile is not None:
                     if "+input:" not in active_profile and target_profile:
                         default_logger.info(
                             f"PulseAudio USB 声卡 profile 切换: {active_profile} -> {target_profile}"
                         )
-                        subprocess.run(
-                            ["pactl", "set-card-profile", current_card, "off"],
-                            capture_output=True, timeout=5
+                        _run(["pactl", "set-card-profile", usb_card_name, target_profile])
+                    elif "+input:" in active_profile:
+                        default_logger.info(
+                            f"PulseAudio USB 声卡 profile 已包含输入: {active_profile}"
                         )
-                        time.sleep(0.3)
-                        subprocess.run(
-                            ["pactl", "set-card-profile", current_card, target_profile],
-                            capture_output=True, timeout=5
-                        )
-                        time.sleep(0.5)
-                    current_card = None
-                    active_profile = None
-                    target_profile = None
+                    break
+
+            if not usb_card_name:
+                default_logger.info("PulseAudio 中未发现 USB 声卡")
+                return
+
+            # --- 2. 检查是否已存在 USB 的 source（麦克风）---
+            sources = _run(["pactl", "list", "sources", "short"])
+            usb_source = None
+            for line in sources.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2 and "usb" in parts[1].lower() and "monitor" not in parts[1].lower():
+                    usb_source = parts[1]
+                    break
+
+            if not usb_source and usb_alsa_card:
+                default_logger.info(
+                    f"PulseAudio 无 USB 输入源，尝试手动加载 (alsa card={usb_alsa_card})"
+                )
+                load_result = _run([
+                    "pactl", "load-module", "module-alsa-source",
+                    f"device=hw:{usb_alsa_card},0",
+                    f"source_name=usb_mic",
+                    "source_properties=device.description=USB_Microphone",
+                ])
+                if load_result.returncode == 0:
+                    usb_source = "usb_mic"
+                    default_logger.info("已手动加载 USB 麦克风 source: usb_mic")
+                else:
+                    default_logger.warning(
+                        f"加载 USB 麦克风 source 失败: {load_result.stderr.strip()}"
+                    )
+
+            # --- 3. 将 USB sink/source 设为默认设备 ---
+            sinks = _run(["pactl", "list", "sinks", "short"])
+            for line in sinks.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2 and "usb" in parts[1].lower():
+                    _run(["pactl", "set-default-sink", parts[1]])
+                    default_logger.info(f"PulseAudio 默认输出已设为: {parts[1]}")
+                    break
+
+            if usb_source:
+                _run(["pactl", "set-default-source", usb_source])
+                default_logger.info(f"PulseAudio 默认输入已设为: {usb_source}")
+
         except Exception as e:
-            default_logger.warning(f"自动配置 PulseAudio USB 声卡 profile 失败: {e}")
+            default_logger.warning(f"自动配置 PulseAudio USB 音频失败: {e}")
 
     def _find_device_index_by_name(self, name_keyword: str, is_input: bool):
         """根据设备名关键字查找输入/输出设备索引（模糊匹配，大小写不敏感）

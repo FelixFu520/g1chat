@@ -67,20 +67,68 @@ class RealtimeAudioLoopback:
         self.current_peak = 0
         self.gain_reduction = 0
         
+    @staticmethod
+    def _is_pulseaudio_running() -> bool:
+        import subprocess
+        try:
+            return subprocess.run(
+                ["pulseaudio", "--check"], capture_output=True
+            ).returncode == 0
+        except FileNotFoundError:
+            return False
+
     def get_device_by_name(self, name: str, is_input: bool = True) -> int:
-        """根据名称查找音频设备"""
+        """根据名称查找音频设备
+
+        查找策略与 AudioDevice._find_device_index_by_name 保持一致:
+        优先匹配非 hw 设备 → PulseAudio 未运行时允许 hw 设备 → fallback pulse
+        """
+        pa_running = self._is_pulseaudio_running()
+        hw_candidate = -1
         for i in range(self.p.get_device_count()):
             try:
                 dev_info = self.p.get_device_info_by_index(i)
-                if name in dev_info['name']:
-                    # 检查设备是否支持所需的输入/输出
-                    if is_input and dev_info['maxInputChannels'] > 0:
-                        return i
-                    elif not is_input and dev_info['maxOutputChannels'] > 0:
-                        return i
+                if is_input and dev_info['maxInputChannels'] <= 0:
+                    continue
+                if (not is_input) and dev_info['maxOutputChannels'] <= 0:
+                    continue
+                dev_name = dev_info.get('name', '')
+                if name not in dev_name:
+                    continue
+                if "(hw:" in dev_name:
+                    if hw_candidate == -1:
+                        hw_candidate = i
+                else:
+                    return i
             except Exception as e:
                 logger.error(f"检查设备 {i} 时出错: {e}")
-        return -1
+
+        if hw_candidate != -1 and not pa_running:
+            return hw_candidate
+
+        if pa_running:
+            for i in range(self.p.get_device_count()):
+                try:
+                    dev_info = self.p.get_device_info_by_index(i)
+                    if is_input and dev_info['maxInputChannels'] <= 0:
+                        continue
+                    if (not is_input) and dev_info['maxOutputChannels'] <= 0:
+                        continue
+                    if dev_info.get('name', '').lower() == 'pulse':
+                        direction = '录音' if is_input else '播放'
+                        if hw_candidate != -1:
+                            logger.info(
+                                f"PulseAudio 运行中，{direction}设备使用 pulse (跳过 hw 设备)"
+                            )
+                        else:
+                            logger.info(
+                                f"关键字 '{name}' 未匹配到{direction}设备，fallback 到 pulse"
+                            )
+                        return i
+                except Exception:
+                    pass
+
+        return hw_candidate
     
     def test_sample_rate(self, device_id, is_input=True, test_rates=None):
         """测试设备支持的采样率"""
