@@ -39,7 +39,7 @@ if os.path.exists(G1CHAT_SYSTEM_PROMPT_PATH):
 else:
     system_prompt = "你是一个助手，叫做地瓜，请根据用户的问题给出回答。"
 G1CHAT_DEFAULT_SYSTEM_PROMPT = system_prompt
-G1CHAT_DEFAULT_MODEL = os.getenv("G1CHAT_DEFAULT_MODEL") if os.getenv("G1CHAT_DEFAULT_MODEL") else "doubao-seed-1-6-251015"
+G1CHAT_DEFAULT_MODEL = os.getenv("G1CHAT_DEFAULT_MODEL") if os.getenv("G1CHAT_DEFAULT_MODEL") else "doubao-seed-2-0-lite-260215"
 G1CHAT_ARK_API_KEY = os.getenv("G1CHAT_ARK_API_KEY") if os.getenv("G1CHAT_ARK_API_KEY") else ""
 G1CHAT_ARK_BASE_URL = os.getenv("G1CHAT_ARK_BASE_URL") if os.getenv("G1CHAT_ARK_BASE_URL") else "https://ark.cn-beijing.volces.com/api/v3"
 
